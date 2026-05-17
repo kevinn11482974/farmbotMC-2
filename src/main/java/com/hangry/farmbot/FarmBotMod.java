@@ -6,6 +6,9 @@ import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.client.util.InputUtil;
@@ -20,6 +23,7 @@ public class FarmBotMod implements ClientModInitializer {
     public static boolean botActive = false;
     public static boolean showGui = true;
     public static float clickSpeed = 0.10f;
+    public static int sessionLimitMinutes = 0; // 0 = unlimited
 
     private static boolean goingRight = true;
     private static int clickTickTimer = 0;
@@ -27,19 +31,15 @@ public class FarmBotMod implements ClientModInitializer {
     private static long startTime = 0;
     private static int clickCount = 0;
 
-    // Position tracking
-    private static double lastX = 0;
-    private static double lastZ = 0;
+    private static double lastX = 0, lastZ = 0, lastY = 0;
     private static int stuckTicks = 0;
-    private static final int STUCK_THRESHOLD = 8; // ticks before considering stuck
-
-    // Fall/jump detection
-    private static double lastY = 0;
+    private static final int STUCK_THRESHOLD = 8;
     private static int jumpCooldown = 0;
-    private static int postFlipPauseTicks = 0; // brief pause after flipping
+    private static int postFlipPauseTicks = 0;
 
     private static KeyBinding toggleGuiKey;
     private static KeyBinding toggleBotKey;
+    private static KeyBinding openConfigKey;
 
     @Override
     public void onInitializeClient() {
@@ -49,6 +49,9 @@ public class FarmBotMod implements ClientModInitializer {
         toggleBotKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.farmbot.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_H, "FarmBot"
         ));
+        openConfigKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.farmbot.config", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_J, "FarmBot"
+        ));
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
         HudRenderCallback.EVENT.register(this::renderHud);
     }
@@ -57,6 +60,7 @@ public class FarmBotMod implements ClientModInitializer {
         if (client.player == null) return;
 
         while (toggleGuiKey.wasPressed()) showGui = !showGui;
+        while (openConfigKey.wasPressed()) client.setScreen(new FarmConfigScreen(client.currentScreen));
         while (toggleBotKey.wasPressed()) {
             botActive = !botActive;
             if (botActive) startBot(client);
@@ -65,7 +69,18 @@ public class FarmBotMod implements ClientModInitializer {
 
         if (!botActive) return;
 
-        // Post-flip pause (let player settle after direction change)
+        // Session time limit check
+        if (sessionLimitMinutes > 0) {
+            long elapsed = (System.currentTimeMillis() - startTime) / 1000 / 60;
+            if (elapsed >= sessionLimitMinutes) {
+                botActive = false;
+                stopBot(client);
+                client.player.sendMessage(
+                    Text.literal("§e[FarmBot] Session limit reached (" + sessionLimitMinutes + " min). Stopped!"), false);
+                return;
+            }
+        }
+
         if (postFlipPauseTicks > 0) {
             postFlipPauseTicks--;
             client.player.input.movementSideways = 0f;
@@ -76,43 +91,24 @@ public class FarmBotMod implements ClientModInitializer {
         double currentZ = client.player.getZ();
         double currentY = client.player.getY();
 
-        // Check if stuck (not moving sideways)
-        double deltaX = Math.abs(currentX - lastX);
-        double deltaZ = Math.abs(currentZ - lastZ);
-        double movement = deltaX + deltaZ;
+        double movement = Math.abs(currentX - lastX) + Math.abs(currentZ - lastZ);
+        if (movement < 0.01) stuckTicks++;
+        else stuckTicks = 0;
 
-        if (movement < 0.01) {
-            stuckTicks++;
-        } else {
-            stuckTicks = 0;
-        }
-
-        // Stuck = hit barrier → flip direction
         if (stuckTicks >= STUCK_THRESHOLD) {
             stuckTicks = 0;
-
-            // Check if fell down
             double yDiff = lastY - currentY;
-            if (yDiff > 0.5) {
-                // Fell to next floor, just flip
-                flipDirection();
-            } else {
-                // No fall, try jumping (elevator block)
-                if (jumpCooldown <= 0) {
-                    client.player.jump();
-                    jumpCooldown = 20;
-                }
-                flipDirection();
+            if (yDiff <= 0.5 && jumpCooldown <= 0) {
+                client.player.jump();
+                jumpCooldown = 20;
             }
-
+            flipDirection();
             rowCount++;
-            postFlipPauseTicks = 5; // 5 tick pause after flip
+            postFlipPauseTicks = 5;
         }
 
-        // Move in current direction
         client.player.input.movementSideways = goingRight ? -1.0f : 1.0f;
 
-        // Auto click
         clickTickTimer++;
         int clickEvery = Math.max(1, (int)(clickSpeed / 0.05f));
         if (clickTickTimer >= clickEvery) {
@@ -121,11 +117,9 @@ public class FarmBotMod implements ClientModInitializer {
             clickCount++;
         }
 
-        // Update last position
         lastX = currentX;
         lastZ = currentZ;
         lastY = currentY;
-
         if (jumpCooldown > 0) jumpCooldown--;
     }
 
@@ -140,8 +134,9 @@ public class FarmBotMod implements ClientModInitializer {
         lastX = client.player.getX();
         lastZ = client.player.getZ();
         lastY = client.player.getY();
+        String limitMsg = sessionLimitMinutes > 0 ? " §7(limit: §e" + sessionLimitMinutes + "min§7)" : "";
         client.player.sendMessage(
-            Text.literal("§a[FarmBot] Started! §eH§a=stop §eG§a=hud"), true);
+            Text.literal("§a[FarmBot] Started!§7 H=stop J=config" + limitMsg), true);
     }
 
     private void stopBot(MinecraftClient client) {
@@ -167,52 +162,126 @@ public class FarmBotMod implements ClientModInitializer {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return;
 
-        int x = 10, y = 10, w = 220, h = 165;
+        int x = 10, y = 10, w = 230, h = 185;
         context.fill(x, y, x + w, y + h, 0xCC0a0a1a);
         context.fill(x, y, x + w, y + 2, 0xFF00ff88);
 
         context.drawText(client.textRenderer,
             Text.literal("§a🌾 FarmBot"), x + 6, y + 6, 0xFFFFFF, false);
         context.drawText(client.textRenderer,
-            Text.literal("§7H§f=start/stop  §7G§f=hud"),
+            Text.literal("§7H§f=toggle  §7G§f=hud  §7J§f=config"),
             x + 6, y + 18, 0xAAAAAA, false);
-
         context.fill(x + 4, y + 30, x + w - 4, y + 31, 0xFF333355);
 
         String status = botActive ? "§a● RUNNING" : "§c● STOPPED";
-        context.drawText(client.textRenderer,
-            Text.literal(status), x + 6, y + 36, 0xFFFFFF, false);
+        context.drawText(client.textRenderer, Text.literal(status), x + 6, y + 36, 0xFFFFFF, false);
 
         if (botActive) {
             long elapsed = (System.currentTimeMillis() - startTime) / 1000;
+            String timeStr = String.format("%02d:%02d", elapsed/60, elapsed%60);
+
+            // Session limit progress
+            String timeDisplay;
+            if (sessionLimitMinutes > 0) {
+                long limitSecs = sessionLimitMinutes * 60L;
+                int pct = (int)((elapsed * 100) / limitSecs);
+                timeDisplay = "§7Time: §f" + timeStr + " §7/ §e" + sessionLimitMinutes + "min §7(§f" + pct + "%§7)";
+            } else {
+                timeDisplay = "§7Time:   §f" + timeStr + " §7(unlimited)";
+            }
+
+            context.drawText(client.textRenderer, Text.literal(timeDisplay), x + 6, y + 49, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
-                Text.literal(String.format("§7Time:   §f%02d:%02d", elapsed/60, elapsed%60)),
-                x + 6, y + 49, 0xFFFFFF, false);
+                Text.literal("§7Rows:   §f" + rowCount), x + 6, y + 60, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
-                Text.literal("§7Rows:   §f" + rowCount),
-                x + 6, y + 59, 0xFFFFFF, false);
-            context.drawText(client.textRenderer,
-                Text.literal("§7Clicks: §f" + clickCount),
-                x + 6, y + 69, 0xFFFFFF, false);
+                Text.literal("§7Clicks: §f" + clickCount), x + 6, y + 70, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
                 Text.literal("§7Dir:    §f" + (goingRight ? "→ Right" : "← Left")),
-                x + 6, y + 79, 0xFFFFFF, false);
+                x + 6, y + 80, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
-                Text.literal(String.format("§7Stuck:  §f%d§7/§f%d ticks",
-                    stuckTicks, STUCK_THRESHOLD)),
-                x + 6, y + 89, 0xFFFFFF, false);
+                Text.literal(String.format("§7Stuck:  §f%d§7/§f%d", stuckTicks, STUCK_THRESHOLD)),
+                x + 6, y + 90, 0xFFFFFF, false);
 
-            // Position
-            context.fill(x + 4, y + 101, x + w - 4, y + 102, 0xFF333355);
+            context.fill(x + 4, y + 102, x + w - 4, y + 103, 0xFF333355);
             context.drawText(client.textRenderer,
-                Text.literal(String.format("§7X: §f%.1f  §7Z: §f%.1f",
-                    client.player.getX(), client.player.getZ())),
-                x + 6, y + 106, 0xFFFFFF, false);
-            context.drawText(client.textRenderer,
-                Text.literal(String.format("§7Y: §f%.1f", client.player.getY())),
-                x + 6, y + 116, 0xFFFFFF, false);
+                Text.literal(String.format("§7X:§f%.1f  §7Z:§f%.1f  §7Y:§f%.1f",
+                    client.player.getX(), client.player.getZ(), client.player.getY())),
+                x + 6, y + 107, 0xFFFFFF, false);
         }
 
+        context.fill(x + 4, y + 120, x + w - 4, y + 121, 0xFF333355);
+        context.drawText(client.textRenderer,
+            Text.literal(String.format("§7Click Speed: §e%.2fs", clickSpeed)),
+            x + 6, y + 125, 0xFFFFFF, false);
+        context.drawText(client.textRenderer,
+            Text.literal("§7Session Limit: §e" +
+                (sessionLimitMinutes > 0 ? sessionLimitMinutes + " min" : "Unlimited")),
+            x + 6, y + 136, 0xFFFFFF, false);
+
         context.drawBorder(x, y, w, h, 0xFF00ff44);
+    }
+
+    // ── Config Screen ──────────────────────────────────────────────────────────
+    public static class FarmConfigScreen extends Screen {
+        private final Screen parent;
+        private TextFieldWidget clickField;
+        private TextFieldWidget sessionField;
+
+        public FarmConfigScreen(Screen parent) {
+            super(Text.literal("FarmBot Config"));
+            this.parent = parent;
+        }
+
+        @Override
+        protected void init() {
+            int cx = width / 2;
+            int cy = height / 2;
+
+            clickField = new TextFieldWidget(textRenderer, cx - 80, cy - 30, 160, 20,
+                Text.literal("Click Speed"));
+            clickField.setText(String.valueOf(clickSpeed));
+            clickField.setMaxLength(10);
+            addDrawableChild(clickField);
+
+            sessionField = new TextFieldWidget(textRenderer, cx - 80, cy + 10, 160, 20,
+                Text.literal("Session Minutes"));
+            sessionField.setText(String.valueOf(sessionLimitMinutes));
+            sessionField.setMaxLength(6);
+            addDrawableChild(sessionField);
+
+            addDrawableChild(ButtonWidget.builder(Text.literal("✔ Save & Close"), btn -> {
+                try { clickSpeed = Math.max(0.05f, Float.parseFloat(clickField.getText())); }
+                catch (Exception ignored) {}
+                try { sessionLimitMinutes = Math.max(0, Integer.parseInt(sessionField.getText())); }
+                catch (Exception ignored) {}
+                close();
+            }).dimensions(cx - 80, cy + 40, 160, 20).build());
+
+            addDrawableChild(ButtonWidget.builder(Text.literal("✖ Cancel"), btn -> close())
+                .dimensions(cx - 80, cy + 65, 160, 20).build());
+        }
+
+        @Override
+        public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+            renderBackground(context, mouseX, mouseY, delta);
+            int cx = width / 2, cy = height / 2;
+
+            context.fill(cx - 110, cy - 70, cx + 110, cy + 95, 0xDD0a0a1a);
+            context.fill(cx - 110, cy - 70, cx + 110, cy - 68, 0xFF00ff88);
+            context.drawBorder(cx - 110, cy - 70, 220, 165, 0xFF00ff44);
+
+            context.drawCenteredTextWithShadow(textRenderer,
+                Text.literal("§a🌾 FarmBot Config"), cx, cy - 62, 0xFFFFFF);
+
+            context.drawTextWithShadow(textRenderer,
+                Text.literal("§7Click Speed §8(sec, min 0.05):"), cx - 80, cy - 44, 0xFFFFFF);
+            context.drawTextWithShadow(textRenderer,
+                Text.literal("§7Session Limit §8(minutes, 0=unlimited):"), cx - 80, cy - 4, 0xFFFFFF);
+
+            super.render(context, mouseX, mouseY, delta);
+        }
+
+        @Override
+        public void close() { client.setScreen(parent); }
     }
 }
