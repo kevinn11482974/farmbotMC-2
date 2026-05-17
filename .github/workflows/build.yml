@@ -30,7 +30,7 @@ jobs:
         run: gradle build
 
       - name: Upload .jar artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: farmbot-mod-1.21.1
           path: build/libs/farmbot-1.0.0.jar
