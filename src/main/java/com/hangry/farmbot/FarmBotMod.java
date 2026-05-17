@@ -173,7 +173,7 @@ public class FarmBotMod implements ClientModInitializer {
         if (balCheckDelay > 0) {
             balCheckDelay--;
             if (balCheckDelay == 0) {
-                sendCommand(client, "/bal " + minecraftUsername);
+                sendCommand(client, "/bal " + "minecraftUsername");
             }
         }
 
