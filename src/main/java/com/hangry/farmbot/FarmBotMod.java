@@ -6,9 +6,6 @@ import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.client.gui.widget.ButtonWidget;
-import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.client.util.InputUtil;
@@ -22,22 +19,27 @@ public class FarmBotMod implements ClientModInitializer {
 
     public static boolean botActive = false;
     public static boolean showGui = true;
-    public static float rowDuration = 0.625f;
     public static float clickSpeed = 0.10f;
 
     private static boolean goingRight = true;
-    private static long rowStartTime = 0;
     private static int clickTickTimer = 0;
-    private static double lastY = 0;
-    private static long endRowTime = 0;
-    private static boolean waitingFall = false;
-    private static int jumpCooldown = 0;
     private static int rowCount = 0;
     private static long startTime = 0;
     private static int clickCount = 0;
+
+    // Position tracking
+    private static double lastX = 0;
+    private static double lastZ = 0;
+    private static int stuckTicks = 0;
+    private static final int STUCK_THRESHOLD = 8; // ticks before considering stuck
+
+    // Fall/jump detection
+    private static double lastY = 0;
+    private static int jumpCooldown = 0;
+    private static int postFlipPauseTicks = 0; // brief pause after flipping
+
     private static KeyBinding toggleGuiKey;
     private static KeyBinding toggleBotKey;
-    private static KeyBinding openConfigKey;
 
     @Override
     public void onInitializeClient() {
@@ -47,60 +49,83 @@ public class FarmBotMod implements ClientModInitializer {
         toggleBotKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.farmbot.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_H, "FarmBot"
         ));
-        openConfigKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.farmbot.config", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_J, "FarmBot"
-        ));
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
         HudRenderCallback.EVENT.register(this::renderHud);
     }
 
     private void onTick(MinecraftClient client) {
         if (client.player == null) return;
+
         while (toggleGuiKey.wasPressed()) showGui = !showGui;
-        while (openConfigKey.wasPressed()) {
-            client.setScreen(new FarmConfigScreen(client.currentScreen));
-        }
         while (toggleBotKey.wasPressed()) {
             botActive = !botActive;
             if (botActive) startBot(client);
             else stopBot(client);
         }
+
         if (!botActive) return;
-        long now = System.currentTimeMillis();
-        long rowDur = (long)(rowDuration * 1000);
-        if (!waitingFall) {
-            client.player.input.movementSideways = goingRight ? -1.0f : 1.0f;
-            clickTickTimer++;
-            int clickEvery = Math.max(1, (int)(clickSpeed / 0.05f));
-            if (clickTickTimer >= clickEvery) {
-                clickTickTimer = 0;
-                doClick(client);
-                clickCount++;
-            }
-            if (now - rowStartTime >= rowDur) {
-                client.player.input.movementSideways = 0f;
-                waitingFall = true;
-                endRowTime = now;
-                lastY = client.player.getY();
-            }
-        } else {
+
+        // Post-flip pause (let player settle after direction change)
+        if (postFlipPauseTicks > 0) {
+            postFlipPauseTicks--;
             client.player.input.movementSideways = 0f;
-            if (System.currentTimeMillis() - endRowTime > 400) {
-                double currentY = client.player.getY();
-                if (lastY - currentY > 0.5) {
-                    flipDirection();
-                } else {
-                    if (jumpCooldown <= 0) {
-                        client.player.jump();
-                        jumpCooldown = 15;
-                        flipDirection();
-                    }
-                }
-                waitingFall = false;
-                rowStartTime = System.currentTimeMillis();
-                rowCount++;
-            }
+            return;
         }
+
+        double currentX = client.player.getX();
+        double currentZ = client.player.getZ();
+        double currentY = client.player.getY();
+
+        // Check if stuck (not moving sideways)
+        double deltaX = Math.abs(currentX - lastX);
+        double deltaZ = Math.abs(currentZ - lastZ);
+        double movement = deltaX + deltaZ;
+
+        if (movement < 0.01) {
+            stuckTicks++;
+        } else {
+            stuckTicks = 0;
+        }
+
+        // Stuck = hit barrier → flip direction
+        if (stuckTicks >= STUCK_THRESHOLD) {
+            stuckTicks = 0;
+
+            // Check if fell down
+            double yDiff = lastY - currentY;
+            if (yDiff > 0.5) {
+                // Fell to next floor, just flip
+                flipDirection();
+            } else {
+                // No fall, try jumping (elevator block)
+                if (jumpCooldown <= 0) {
+                    client.player.jump();
+                    jumpCooldown = 20;
+                }
+                flipDirection();
+            }
+
+            rowCount++;
+            postFlipPauseTicks = 5; // 5 tick pause after flip
+        }
+
+        // Move in current direction
+        client.player.input.movementSideways = goingRight ? -1.0f : 1.0f;
+
+        // Auto click
+        clickTickTimer++;
+        int clickEvery = Math.max(1, (int)(clickSpeed / 0.05f));
+        if (clickTickTimer >= clickEvery) {
+            clickTickTimer = 0;
+            doClick(client);
+            clickCount++;
+        }
+
+        // Update last position
+        lastX = currentX;
+        lastZ = currentZ;
+        lastY = currentY;
+
         if (jumpCooldown > 0) jumpCooldown--;
     }
 
@@ -109,11 +134,14 @@ public class FarmBotMod implements ClientModInitializer {
         rowCount = 0;
         clickCount = 0;
         startTime = System.currentTimeMillis();
-        rowStartTime = startTime;
-        waitingFall = false;
+        stuckTicks = 0;
         jumpCooldown = 0;
+        postFlipPauseTicks = 0;
+        lastX = client.player.getX();
+        lastZ = client.player.getZ();
         lastY = client.player.getY();
-        client.player.sendMessage(Text.literal("§a[FarmBot] Started! §eH§a=stop §eJ§a=config"), true);
+        client.player.sendMessage(
+            Text.literal("§a[FarmBot] Started! §eH§a=stop §eG§a=hud"), true);
     }
 
     private void stopBot(MinecraftClient client) {
@@ -138,108 +166,53 @@ public class FarmBotMod implements ClientModInitializer {
         if (!showGui) return;
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return;
-        int x = 10, y = 10, w = 220, h = 175;
+
+        int x = 10, y = 10, w = 220, h = 165;
         context.fill(x, y, x + w, y + h, 0xCC0a0a1a);
         context.fill(x, y, x + w, y + 2, 0xFF00ff88);
+
         context.drawText(client.textRenderer,
             Text.literal("§a🌾 FarmBot"), x + 6, y + 6, 0xFFFFFF, false);
         context.drawText(client.textRenderer,
-            Text.literal("§7H§f=start/stop §7G§f=hud §7J§f=config"),
+            Text.literal("§7H§f=start/stop  §7G§f=hud"),
             x + 6, y + 18, 0xAAAAAA, false);
+
         context.fill(x + 4, y + 30, x + w - 4, y + 31, 0xFF333355);
+
         String status = botActive ? "§a● RUNNING" : "§c● STOPPED";
-        context.drawText(client.textRenderer, Text.literal(status), x + 6, y + 35, 0xFFFFFF, false);
+        context.drawText(client.textRenderer,
+            Text.literal(status), x + 6, y + 36, 0xFFFFFF, false);
+
         if (botActive) {
             long elapsed = (System.currentTimeMillis() - startTime) / 1000;
             context.drawText(client.textRenderer,
-                Text.literal(String.format("§7Time: §f%02d:%02d", elapsed/60, elapsed%60)),
-                x + 6, y + 48, 0xFFFFFF, false);
+                Text.literal(String.format("§7Time:   §f%02d:%02d", elapsed/60, elapsed%60)),
+                x + 6, y + 49, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
-                Text.literal("§7Rows: §f" + rowCount), x + 6, y + 58, 0xFFFFFF, false);
+                Text.literal("§7Rows:   §f" + rowCount),
+                x + 6, y + 59, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
-                Text.literal("§7Clicks: §f" + clickCount), x + 6, y + 68, 0xFFFFFF, false);
+                Text.literal("§7Clicks: §f" + clickCount),
+                x + 6, y + 69, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
-                Text.literal("§7Dir: §f" + (goingRight ? "→ Right" : "← Left")),
-                x + 6, y + 78, 0xFFFFFF, false);
+                Text.literal("§7Dir:    §f" + (goingRight ? "→ Right" : "← Left")),
+                x + 6, y + 79, 0xFFFFFF, false);
+            context.drawText(client.textRenderer,
+                Text.literal(String.format("§7Stuck:  §f%d§7/§f%d ticks",
+                    stuckTicks, STUCK_THRESHOLD)),
+                x + 6, y + 89, 0xFFFFFF, false);
+
+            // Position
+            context.fill(x + 4, y + 101, x + w - 4, y + 102, 0xFF333355);
+            context.drawText(client.textRenderer,
+                Text.literal(String.format("§7X: §f%.1f  §7Z: §f%.1f",
+                    client.player.getX(), client.player.getZ())),
+                x + 6, y + 106, 0xFFFFFF, false);
+            context.drawText(client.textRenderer,
+                Text.literal(String.format("§7Y: §f%.1f", client.player.getY())),
+                x + 6, y + 116, 0xFFFFFF, false);
         }
-        context.fill(x + 4, y + 91, x + w - 4, y + 92, 0xFF333355);
-        context.drawText(client.textRenderer,
-            Text.literal(String.format("§7Row Duration: §e%.3fs", rowDuration)),
-            x + 6, y + 97, 0xFFFFFF, false);
-        context.drawText(client.textRenderer,
-            Text.literal(String.format("§7Click Speed:  §e%.2fs", clickSpeed)),
-            x + 6, y + 108, 0xFFFFFF, false);
-        context.drawText(client.textRenderer,
-            Text.literal("§7Press §eJ §7to open config"), x + 6, y + 120, 0xAAAAAA, false);
+
         context.drawBorder(x, y, w, h, 0xFF00ff44);
-    }
-
-    // ── Config Screen ─────────────────────────────────────────────────────────
-    public static class FarmConfigScreen extends Screen {
-        private final Screen parent;
-        private TextFieldWidget rowField;
-        private TextFieldWidget clickField;
-
-        public FarmConfigScreen(Screen parent) {
-            super(Text.literal("FarmBot Config"));
-            this.parent = parent;
-        }
-
-        @Override
-        protected void init() {
-            int cx = width / 2;
-            int cy = height / 2;
-
-            // Row duration field
-            rowField = new TextFieldWidget(textRenderer, cx - 60, cy - 40, 120, 20,
-                Text.literal("Row Duration"));
-            rowField.setText(String.valueOf(rowDuration));
-            rowField.setMaxLength(10);
-            addDrawableChild(rowField);
-
-            // Click speed field
-            clickField = new TextFieldWidget(textRenderer, cx - 60, cy, 120, 20,
-                Text.literal("Click Speed"));
-            clickField.setText(String.valueOf(clickSpeed));
-            clickField.setMaxLength(10);
-            addDrawableChild(clickField);
-
-            // Save button
-            addDrawableChild(ButtonWidget.builder(Text.literal("✔ Save & Close"), btn -> {
-                try { rowDuration = Float.parseFloat(rowField.getText()); } catch (Exception ignored) {}
-                try { clickSpeed = Float.parseFloat(clickField.getText()); } catch (Exception ignored) {}
-                close();
-            }).dimensions(cx - 60, cy + 30, 120, 20).build());
-
-            // Cancel button
-            addDrawableChild(ButtonWidget.builder(Text.literal("✖ Cancel"), btn -> close())
-                .dimensions(cx - 60, cy + 55, 120, 20).build());
-        }
-
-        @Override
-        public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-            renderBackground(context, mouseX, mouseY, delta);
-            int cx = width / 2;
-            int cy = height / 2;
-
-            // Panel background
-            context.fill(cx - 90, cy - 65, cx + 90, cy + 80, 0xDD0a0a1a);
-            context.fill(cx - 90, cy - 65, cx + 90, cy - 63, 0xFF00ff88);
-            context.drawBorder(cx - 90, cy - 65, 180, 145, 0xFF00ff44);
-
-            context.drawCenteredTextWithShadow(textRenderer,
-                Text.literal("§a🌾 FarmBot Config"), cx, cy - 58, 0xFFFFFF);
-            context.drawTextWithShadow(textRenderer,
-                Text.literal("§7Row Duration §8(seconds):"), cx - 60, cy - 52, 0xFFFFFF);
-            context.drawTextWithShadow(textRenderer,
-                Text.literal("§7Click Speed §8(seconds):"), cx - 60, cy - 12, 0xFFFFFF);
-
-            super.render(context, mouseX, mouseY, delta);
-        }
-
-        @Override
-        public void close() {
-            client.setScreen(parent);
-        }
     }
 }
