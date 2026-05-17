@@ -7,6 +7,7 @@ import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
@@ -18,7 +19,6 @@ public class FarmBotMod implements ClientModInitializer {
 
     public static boolean botActive = false;
     public static boolean showGui = true;
-
     private static boolean goingRight = true;
     private static long rowStartTime = 0;
     private static float rowDurationSlider = 0.625f;
@@ -31,7 +31,6 @@ public class FarmBotMod implements ClientModInitializer {
     private static int rowCount = 0;
     private static long startTime = 0;
     private static int clickCount = 0;
-
     private static KeyBinding toggleGuiKey;
     private static KeyBinding toggleBotKey;
 
@@ -43,29 +42,23 @@ public class FarmBotMod implements ClientModInitializer {
         toggleBotKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.farmbot.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_H, "FarmBot"
         ));
-
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
         HudRenderCallback.EVENT.register(this::renderHud);
     }
 
     private void onTick(MinecraftClient client) {
         if (client.player == null) return;
-
         while (toggleGuiKey.wasPressed()) showGui = !showGui;
         while (toggleBotKey.wasPressed()) {
             botActive = !botActive;
             if (botActive) startBot(client);
             else stopBot(client);
         }
-
         if (!botActive) return;
-
         long now = System.currentTimeMillis();
         long rowDur = (long)(rowDurationSlider * 1000);
-
         if (!waitingFall) {
             client.player.input.movementSideways = goingRight ? -1.0f : 1.0f;
-
             clickTickTimer++;
             int clickEvery = Math.max(1, (int)(clickSpeedSlider / 0.05f));
             if (clickTickTimer >= clickEvery) {
@@ -73,7 +66,6 @@ public class FarmBotMod implements ClientModInitializer {
                 doClick(client);
                 clickCount++;
             }
-
             if (now - rowStartTime >= rowDur) {
                 client.player.input.movementSideways = 0f;
                 waitingFall = true;
@@ -82,9 +74,7 @@ public class FarmBotMod implements ClientModInitializer {
             }
         } else {
             client.player.input.movementSideways = 0f;
-            long waitedMs = now - endRowTime;
-
-            if (waitedMs > 400) {
+            if (System.currentTimeMillis() - endRowTime > 400) {
                 double currentY = client.player.getY();
                 if (lastY - currentY > 0.5) {
                     flipDirection();
@@ -96,11 +86,10 @@ public class FarmBotMod implements ClientModInitializer {
                     }
                 }
                 waitingFall = false;
-                rowStartTime = now;
+                rowStartTime = System.currentTimeMillis();
                 rowCount++;
             }
         }
-
         if (jumpCooldown > 0) jumpCooldown--;
     }
 
@@ -112,15 +101,13 @@ public class FarmBotMod implements ClientModInitializer {
         rowStartTime = startTime;
         waitingFall = false;
         jumpCooldown = 0;
-        if (client.player != null) lastY = client.player.getY();
+        lastY = client.player.getY();
         client.player.sendMessage(Text.literal("§a[FarmBot] Started! Press §eH§a to stop."), true);
     }
 
     private void stopBot(MinecraftClient client) {
-        if (client.player != null) {
-            client.player.input.movementSideways = 0f;
-            client.player.sendMessage(Text.literal("§c[FarmBot] Stopped."), true);
-        }
+        client.player.input.movementSideways = 0f;
+        client.player.sendMessage(Text.literal("§c[FarmBot] Stopped."), true);
     }
 
     private void flipDirection() {
@@ -138,22 +125,18 @@ public class FarmBotMod implements ClientModInitializer {
         }
     }
 
-    private void renderHud(DrawContext context, float tickDelta) {
+    private void renderHud(DrawContext context, RenderTickCounter tickCounter) {
         if (!showGui) return;
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return;
-
         int x = 10, y = 10, w = 200, h = 160;
         context.fill(x, y, x + w, y + h, 0xCC0a0a1a);
         context.fill(x, y, x + w, y + 2, 0xFF00ff88);
-
         context.drawText(client.textRenderer,
             Text.literal("§a🌾 FarmBot §7| §eH§f=toggle §eG§f=gui"),
             x + 6, y + 6, 0xFFFFFF, false);
-
         String status = botActive ? "§a● RUNNING" : "§c● STOPPED";
         context.drawText(client.textRenderer, Text.literal(status), x + 6, y + 20, 0xFFFFFF, false);
-
         if (botActive) {
             long elapsed = (System.currentTimeMillis() - startTime) / 1000;
             context.drawText(client.textRenderer,
@@ -167,7 +150,6 @@ public class FarmBotMod implements ClientModInitializer {
                 Text.literal("§7Dir: §f" + (goingRight ? "→ Right" : "← Left")),
                 x + 6, y + 63, 0xFFFFFF, false);
         }
-
         context.fill(x + 4, y + 76, x + w - 4, y + 77, 0xFF333355);
         context.drawText(client.textRenderer,
             Text.literal(String.format("§7Row Duration: §e%.2fs", rowDurationSlider)),
@@ -175,10 +157,6 @@ public class FarmBotMod implements ClientModInitializer {
         context.drawText(client.textRenderer,
             Text.literal(String.format("§7Click Speed: §e%.2fs", clickSpeedSlider)),
             x + 6, y + 95, 0xFFFFFF, false);
-        context.drawText(client.textRenderer,
-            Text.literal("§7(Adjust in mod config)"),
-            x + 6, y + 108, 0x888888, false);
-
         context.drawBorder(x, y, w, h, 0xFF00ff44);
     }
 }
