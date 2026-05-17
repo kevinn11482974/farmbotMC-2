@@ -34,7 +34,13 @@ public class FarmBotMod implements ClientModInitializer {
     private static double lastX = 0, lastZ = 0, lastY = 0;
     private static int stuckTicks = 0;
     private static final int STUCK_THRESHOLD = 8;
-    private static int jumpCooldown = 0;
+
+    // Jump state machine
+    private static int jumpHoldTicks = 0;       // how many ticks left to hold space
+    private static int jumpCooldown = 0;         // cooldown after jump
+    private static final int JUMP_HOLD = 6;      // hold space for 6 ticks
+    private static final int JUMP_COOLDOWN = 25; // wait 25 ticks before next jump
+
     private static int postFlipPauseTicks = 0;
 
     private static KeyBinding toggleGuiKey;
@@ -100,7 +106,25 @@ public class FarmBotMod implements ClientModInitializer {
             }
         }
 
-        // Post-flip pause
+        // ── Jump hold state machine ───────────────────────────────────────────
+        if (jumpHoldTicks > 0) {
+            pressKey(GLFW.GLFW_KEY_SPACE, true);
+            jumpHoldTicks--;
+            if (jumpHoldTicks == 0) {
+                pressKey(GLFW.GLFW_KEY_SPACE, false);
+                jumpCooldown = JUMP_COOLDOWN;
+            }
+            // still click while jumping
+            doClickTick(client);
+            lastX = client.player.getX();
+            lastZ = client.player.getZ();
+            lastY = client.player.getY();
+            return;
+        }
+
+        if (jumpCooldown > 0) jumpCooldown--;
+
+        // ── Post-flip pause ───────────────────────────────────────────────────
         if (postFlipPauseTicks > 0) {
             postFlipPauseTicks--;
             stopMovement();
@@ -115,31 +139,38 @@ public class FarmBotMod implements ClientModInitializer {
         if (movement < 0.01) stuckTicks++;
         else stuckTicks = 0;
 
+        // ── Hit a wall ────────────────────────────────────────────────────────
         if (stuckTicks >= STUCK_THRESHOLD) {
             stuckTicks = 0;
             stopMovement();
 
             double yDiff = lastY - currentY;
             if (yDiff <= 0.5 && jumpCooldown <= 0) {
+                // No fall detected → elevator block → jump!
+                jumpHoldTicks = JUMP_HOLD;
                 pressKey(GLFW.GLFW_KEY_SPACE, true);
-                pressKey(GLFW.GLFW_KEY_SPACE, false);
-                jumpCooldown = 20;
             }
 
             flipDirection();
             rowCount++;
             postFlipPauseTicks = 5;
+
             lastX = currentX;
             lastZ = currentZ;
             lastY = currentY;
-            if (jumpCooldown > 0) jumpCooldown--;
             return;
         }
 
-        // Move
+        // ── Normal movement + clicking ────────────────────────────────────────
         applyMovement();
+        doClickTick(client);
 
-        // Click
+        lastX = currentX;
+        lastZ = currentZ;
+        lastY = currentY;
+    }
+
+    private void doClickTick(MinecraftClient client) {
         clickTickTimer++;
         int clickEvery = Math.max(1, (int)(clickSpeed / 0.05f));
         if (clickTickTimer >= clickEvery) {
@@ -147,11 +178,6 @@ public class FarmBotMod implements ClientModInitializer {
             doClick(client);
             clickCount++;
         }
-
-        lastX = currentX;
-        lastZ = currentZ;
-        lastY = currentY;
-        if (jumpCooldown > 0) jumpCooldown--;
     }
 
     private void startBot(MinecraftClient client) {
@@ -160,18 +186,22 @@ public class FarmBotMod implements ClientModInitializer {
         clickCount = 0;
         startTime = System.currentTimeMillis();
         stuckTicks = 0;
+        jumpHoldTicks = 0;
         jumpCooldown = 0;
         postFlipPauseTicks = 0;
         lastX = client.player.getX();
         lastZ = client.player.getZ();
         lastY = client.player.getY();
-        String limitMsg = sessionLimitMinutes > 0 ? " §7(limit: §e" + sessionLimitMinutes + "min§7)" : "";
+        String limitMsg = sessionLimitMinutes > 0
+            ? " §7(limit: §e" + sessionLimitMinutes + "min§7)" : "";
         client.player.sendMessage(
             Text.literal("§a[FarmBot] Started! §7H§f=stop §7J§f=config" + limitMsg), true);
     }
 
     private void stopBot(MinecraftClient client) {
         stopMovement();
+        pressKey(GLFW.GLFW_KEY_SPACE, false);
+        jumpHoldTicks = 0;
         client.player.sendMessage(Text.literal("§c[FarmBot] Stopped."), true);
     }
 
@@ -193,7 +223,7 @@ public class FarmBotMod implements ClientModInitializer {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return;
 
-        int x = 10, y = 10, w = 230, h = 190;
+        int x = 10, y = 10, w = 230, h = 195;
         context.fill(x, y, x + w, y + h, 0xCC0a0a1a);
         context.fill(x, y, x + w, y + 2, 0xFF00ff88);
 
@@ -204,17 +234,21 @@ public class FarmBotMod implements ClientModInitializer {
             x + 6, y + 18, 0xAAAAAA, false);
         context.fill(x + 4, y + 30, x + w - 4, y + 31, 0xFF333355);
 
-        String status = botActive ? "§a● RUNNING" : "§c● STOPPED";
+        String status = botActive
+            ? (jumpHoldTicks > 0 ? "§b● JUMPING" : "§a● RUNNING")
+            : "§c● STOPPED";
         context.drawText(client.textRenderer, Text.literal(status), x + 6, y + 36, 0xFFFFFF, false);
 
         if (botActive) {
             long elapsed = (System.currentTimeMillis() - startTime) / 1000;
             String timeStr = String.format("%02d:%02d", elapsed / 60, elapsed % 60);
             String timeDisplay = sessionLimitMinutes > 0
-                ? "§7Time: §f" + timeStr + " §7/ §e" + sessionLimitMinutes + "min §7(§f" + (int)((elapsed * 100) / (sessionLimitMinutes * 60L)) + "%§7)"
+                ? "§7Time: §f" + timeStr + " §7/ §e" + sessionLimitMinutes
+                    + "min §7(§f" + (int)((elapsed * 100) / (sessionLimitMinutes * 60L)) + "%§7)"
                 : "§7Time:   §f" + timeStr + " §7(unlimited)";
 
-            context.drawText(client.textRenderer, Text.literal(timeDisplay), x + 6, y + 49, 0xFFFFFF, false);
+            context.drawText(client.textRenderer,
+                Text.literal(timeDisplay), x + 6, y + 49, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
                 Text.literal("§7Rows:   §f" + rowCount), x + 6, y + 60, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
@@ -225,21 +259,27 @@ public class FarmBotMod implements ClientModInitializer {
             context.drawText(client.textRenderer,
                 Text.literal(String.format("§7Stuck:  §f%d§7/§f%d ticks", stuckTicks, STUCK_THRESHOLD)),
                 x + 6, y + 90, 0xFFFFFF, false);
-            context.fill(x + 4, y + 102, x + w - 4, y + 103, 0xFF333355);
+            context.drawText(client.textRenderer,
+                Text.literal("§7Jump:   §f" + (jumpHoldTicks > 0
+                    ? "§bHOLDING (" + jumpHoldTicks + ")" : jumpCooldown > 0
+                    ? "§7cooldown (" + jumpCooldown + ")" : "§aready")),
+                x + 6, y + 100, 0xFFFFFF, false);
+
+            context.fill(x + 4, y + 112, x + w - 4, y + 113, 0xFF333355);
             context.drawText(client.textRenderer,
                 Text.literal(String.format("§7X:§f%.1f  §7Z:§f%.1f  §7Y:§f%.1f",
                     client.player.getX(), client.player.getZ(), client.player.getY())),
-                x + 6, y + 107, 0xFFFFFF, false);
+                x + 6, y + 117, 0xFFFFFF, false);
         }
 
-        context.fill(x + 4, y + 120, x + w - 4, y + 121, 0xFF333355);
+        context.fill(x + 4, y + 130, x + w - 4, y + 131, 0xFF333355);
         context.drawText(client.textRenderer,
-            Text.literal(String.format("§7Click Speed:    §e%.2fs", clickSpeed)),
-            x + 6, y + 125, 0xFFFFFF, false);
+            Text.literal(String.format("§7Click Speed:   §e%.2fs", clickSpeed)),
+            x + 6, y + 135, 0xFFFFFF, false);
         context.drawText(client.textRenderer,
-            Text.literal("§7Session Limit:  §e" +
+            Text.literal("§7Session Limit: §e" +
                 (sessionLimitMinutes > 0 ? sessionLimitMinutes + " min" : "Unlimited")),
-            x + 6, y + 136, 0xFFFFFF, false);
+            x + 6, y + 146, 0xFFFFFF, false);
 
         context.drawBorder(x, y, w, h, 0xFF00ff44);
     }
