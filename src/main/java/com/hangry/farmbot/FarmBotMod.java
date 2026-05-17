@@ -23,7 +23,7 @@ public class FarmBotMod implements ClientModInitializer {
     public static boolean botActive = false;
     public static boolean showGui = true;
     public static float clickSpeed = 0.10f;
-    public static int sessionLimitMinutes = 0; // 0 = unlimited
+    public static int sessionLimitMinutes = 0;
 
     private static boolean goingRight = true;
     private static int clickTickTimer = 0;
@@ -56,6 +56,25 @@ public class FarmBotMod implements ClientModInitializer {
         HudRenderCallback.EVENT.register(this::renderHud);
     }
 
+    private static void pressKey(int keyCode, boolean pressed) {
+        KeyBinding.setKeyPressed(InputUtil.fromKeyCode(keyCode, 0), pressed);
+    }
+
+    private static void stopMovement() {
+        pressKey(GLFW.GLFW_KEY_A, false);
+        pressKey(GLFW.GLFW_KEY_D, false);
+    }
+
+    private static void applyMovement() {
+        if (goingRight) {
+            pressKey(GLFW.GLFW_KEY_A, false);
+            pressKey(GLFW.GLFW_KEY_D, true);
+        } else {
+            pressKey(GLFW.GLFW_KEY_D, false);
+            pressKey(GLFW.GLFW_KEY_A, true);
+        }
+    }
+
     private void onTick(MinecraftClient client) {
         if (client.player == null) return;
 
@@ -69,21 +88,22 @@ public class FarmBotMod implements ClientModInitializer {
 
         if (!botActive) return;
 
-        // Session time limit check
+        // Session limit check
         if (sessionLimitMinutes > 0) {
             long elapsed = (System.currentTimeMillis() - startTime) / 1000 / 60;
             if (elapsed >= sessionLimitMinutes) {
                 botActive = false;
                 stopBot(client);
                 client.player.sendMessage(
-                    Text.literal("§e[FarmBot] Session limit reached (" + sessionLimitMinutes + " min). Stopped!"), false);
+                    Text.literal("§e[FarmBot] Session limit reached (" + sessionLimitMinutes + "min). Stopped!"), false);
                 return;
             }
         }
 
+        // Post-flip pause
         if (postFlipPauseTicks > 0) {
             postFlipPauseTicks--;
-            client.player.input.movementSideways = 0f;
+            stopMovement();
             return;
         }
 
@@ -97,18 +117,29 @@ public class FarmBotMod implements ClientModInitializer {
 
         if (stuckTicks >= STUCK_THRESHOLD) {
             stuckTicks = 0;
+            stopMovement();
+
             double yDiff = lastY - currentY;
             if (yDiff <= 0.5 && jumpCooldown <= 0) {
-                client.player.jump();
+                pressKey(GLFW.GLFW_KEY_SPACE, true);
+                pressKey(GLFW.GLFW_KEY_SPACE, false);
                 jumpCooldown = 20;
             }
+
             flipDirection();
             rowCount++;
             postFlipPauseTicks = 5;
+            lastX = currentX;
+            lastZ = currentZ;
+            lastY = currentY;
+            if (jumpCooldown > 0) jumpCooldown--;
+            return;
         }
 
-        client.player.input.movementSideways = goingRight ? -1.0f : 1.0f;
+        // Move
+        applyMovement();
 
+        // Click
         clickTickTimer++;
         int clickEvery = Math.max(1, (int)(clickSpeed / 0.05f));
         if (clickTickTimer >= clickEvery) {
@@ -136,11 +167,11 @@ public class FarmBotMod implements ClientModInitializer {
         lastY = client.player.getY();
         String limitMsg = sessionLimitMinutes > 0 ? " §7(limit: §e" + sessionLimitMinutes + "min§7)" : "";
         client.player.sendMessage(
-            Text.literal("§a[FarmBot] Started!§7 H=stop J=config" + limitMsg), true);
+            Text.literal("§a[FarmBot] Started! §7H§f=stop §7J§f=config" + limitMsg), true);
     }
 
     private void stopBot(MinecraftClient client) {
-        client.player.input.movementSideways = 0f;
+        stopMovement();
         client.player.sendMessage(Text.literal("§c[FarmBot] Stopped."), true);
     }
 
@@ -162,7 +193,7 @@ public class FarmBotMod implements ClientModInitializer {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return;
 
-        int x = 10, y = 10, w = 230, h = 185;
+        int x = 10, y = 10, w = 230, h = 190;
         context.fill(x, y, x + w, y + h, 0xCC0a0a1a);
         context.fill(x, y, x + w, y + 2, 0xFF00ff88);
 
@@ -178,17 +209,10 @@ public class FarmBotMod implements ClientModInitializer {
 
         if (botActive) {
             long elapsed = (System.currentTimeMillis() - startTime) / 1000;
-            String timeStr = String.format("%02d:%02d", elapsed/60, elapsed%60);
-
-            // Session limit progress
-            String timeDisplay;
-            if (sessionLimitMinutes > 0) {
-                long limitSecs = sessionLimitMinutes * 60L;
-                int pct = (int)((elapsed * 100) / limitSecs);
-                timeDisplay = "§7Time: §f" + timeStr + " §7/ §e" + sessionLimitMinutes + "min §7(§f" + pct + "%§7)";
-            } else {
-                timeDisplay = "§7Time:   §f" + timeStr + " §7(unlimited)";
-            }
+            String timeStr = String.format("%02d:%02d", elapsed / 60, elapsed % 60);
+            String timeDisplay = sessionLimitMinutes > 0
+                ? "§7Time: §f" + timeStr + " §7/ §e" + sessionLimitMinutes + "min §7(§f" + (int)((elapsed * 100) / (sessionLimitMinutes * 60L)) + "%§7)"
+                : "§7Time:   §f" + timeStr + " §7(unlimited)";
 
             context.drawText(client.textRenderer, Text.literal(timeDisplay), x + 6, y + 49, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
@@ -196,12 +220,11 @@ public class FarmBotMod implements ClientModInitializer {
             context.drawText(client.textRenderer,
                 Text.literal("§7Clicks: §f" + clickCount), x + 6, y + 70, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
-                Text.literal("§7Dir:    §f" + (goingRight ? "→ Right" : "← Left")),
+                Text.literal("§7Dir:    §f" + (goingRight ? "→ Right (D)" : "← Left (A)")),
                 x + 6, y + 80, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
-                Text.literal(String.format("§7Stuck:  §f%d§7/§f%d", stuckTicks, STUCK_THRESHOLD)),
+                Text.literal(String.format("§7Stuck:  §f%d§7/§f%d ticks", stuckTicks, STUCK_THRESHOLD)),
                 x + 6, y + 90, 0xFFFFFF, false);
-
             context.fill(x + 4, y + 102, x + w - 4, y + 103, 0xFF333355);
             context.drawText(client.textRenderer,
                 Text.literal(String.format("§7X:§f%.1f  §7Z:§f%.1f  §7Y:§f%.1f",
@@ -211,17 +234,16 @@ public class FarmBotMod implements ClientModInitializer {
 
         context.fill(x + 4, y + 120, x + w - 4, y + 121, 0xFF333355);
         context.drawText(client.textRenderer,
-            Text.literal(String.format("§7Click Speed: §e%.2fs", clickSpeed)),
+            Text.literal(String.format("§7Click Speed:    §e%.2fs", clickSpeed)),
             x + 6, y + 125, 0xFFFFFF, false);
         context.drawText(client.textRenderer,
-            Text.literal("§7Session Limit: §e" +
+            Text.literal("§7Session Limit:  §e" +
                 (sessionLimitMinutes > 0 ? sessionLimitMinutes + " min" : "Unlimited")),
             x + 6, y + 136, 0xFFFFFF, false);
 
         context.drawBorder(x, y, w, h, 0xFF00ff44);
     }
 
-    // ── Config Screen ──────────────────────────────────────────────────────────
     public static class FarmConfigScreen extends Screen {
         private final Screen parent;
         private TextFieldWidget clickField;
@@ -234,8 +256,7 @@ public class FarmBotMod implements ClientModInitializer {
 
         @Override
         protected void init() {
-            int cx = width / 2;
-            int cy = height / 2;
+            int cx = width / 2, cy = height / 2;
 
             clickField = new TextFieldWidget(textRenderer, cx - 80, cy - 30, 160, 20,
                 Text.literal("Click Speed"));
@@ -272,7 +293,6 @@ public class FarmBotMod implements ClientModInitializer {
 
             context.drawCenteredTextWithShadow(textRenderer,
                 Text.literal("§a🌾 FarmBot Config"), cx, cy - 62, 0xFFFFFF);
-
             context.drawTextWithShadow(textRenderer,
                 Text.literal("§7Click Speed §8(sec, min 0.05):"), cx - 80, cy - 44, 0xFFFFFF);
             context.drawTextWithShadow(textRenderer,
