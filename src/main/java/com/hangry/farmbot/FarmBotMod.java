@@ -10,11 +10,9 @@ import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
-import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.client.util.InputUtil;
-import net.minecraft.network.packet.c2s.play.ChatMessageC2SPacket;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
@@ -78,7 +76,6 @@ public class FarmBotMod implements ClientModInitializer {
 
     // ── Session history ───────────────────────────────────────────────────────
     public static final List<SessionRecord> sessionHistory = new ArrayList<>();
-
     public static class SessionRecord {
         public String time, duration;
         public long profit;
@@ -111,7 +108,6 @@ public class FarmBotMod implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
         HudRenderCallback.EVENT.register(this::renderHud);
 
-        // Listen to chat for /bal response
         net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             String raw = message.getString();
             Matcher m = BAL_PATTERN.matcher(raw);
@@ -161,8 +157,13 @@ public class FarmBotMod implements ClientModInitializer {
     private void onTick(MinecraftClient client) {
         if (client.player == null) return;
 
+        // Auto-detect username if not set
+        if (minecraftUsername.isEmpty() && client.player != null) {
+            minecraftUsername = client.player.getName().getString();
+        }
+
         while (toggleGuiKey.wasPressed()) showGui = !showGui;
-        while (openConfigKey.wasPressed()) client.setScreen(new FarmBotScreen(client.currentScreen));
+        while (openConfigKey.wasPressed()) client.setScreen(new FarmConfigScreen(client.currentScreen));
         while (toggleBotKey.wasPressed()) {
             botActive = !botActive;
             if (botActive) startBot(client);
@@ -173,7 +174,10 @@ public class FarmBotMod implements ClientModInitializer {
         if (balCheckDelay > 0) {
             balCheckDelay--;
             if (balCheckDelay == 0) {
-                sendCommand(client, "/bal " + "minecraftUsername");
+                String username = minecraftUsername.isEmpty()
+                    ? client.player.getName().getString()
+                    : minecraftUsername;
+                client.player.networkHandler.sendCommand("bal " + username);
             }
         }
 
@@ -191,25 +195,24 @@ public class FarmBotMod implements ClientModInitializer {
 
         // ── Activity check detection ──────────────────────────────────────────
         boolean isHandledOpen = client.currentScreen instanceof HandledScreen;
-        if (isHandledOpen && !wasHandledScreenOpen && botActive) {
+        if (isHandledOpen && !wasHandledScreenOpen) {
             long now = System.currentTimeMillis();
             if (now - lastWebhookSent > WEBHOOK_COOLDOWN_MS) {
                 activityCheckCount++;
                 lastWebhookSent = now;
                 stopMovement();
-                botActive = false;
                 pressKey(GLFW.GLFW_KEY_SPACE, false);
                 jumpHoldTicks = 0;
+                botActive = false;
                 String sessionTime = formatTime((System.currentTimeMillis() - startTime) / 1000);
                 if (notifyActivityCheck) {
                     sendWebhook(
-                        "@everyone\\n" +
-                        "⚠️ **ACTIVITY CHECK DETECTED!**\\n" +
-                        "👤 Player: **" + minecraftUsername + "**\\n" +
-                        "🔢 Check #" + activityCheckCount + "\\n" +
-                        "⏱ Session: **" + sessionTime + "**\\n" +
-                        "🌾 Rows: **" + rowCount + "** | Clicks: **" + clickCount + "**\\n" +
-                        "💰 Balance: **$" + formatMoney(balanceCurrent) + "**\\n" +
+                        "@everyone\n⚠️ **ACTIVITY CHECK DETECTED!**\n" +
+                        "👤 Player: **" + minecraftUsername + "**\n" +
+                        "🔢 Check #" + activityCheckCount + "\n" +
+                        "⏱ Session: **" + sessionTime + "**\n" +
+                        "🌾 Rows: **" + rowCount + "** | Clicks: **" + clickCount + "**\n" +
+                        "💰 Balance: **$" + formatMoney(balanceCurrent) + "**\n" +
                         "⚡ Bot **paused** — please respond!"
                     );
                 }
@@ -292,8 +295,6 @@ public class FarmBotMod implements ClientModInitializer {
         lastZ = client.player.getZ();
         lastY = client.player.getY();
         randomizeClickSpeed();
-
-        // Fetch balance before
         waitingForBalBefore = true;
         balCheckDelay = 20;
 
@@ -304,10 +305,10 @@ public class FarmBotMod implements ClientModInitializer {
 
         if (notifyBotStart && !webhookUrl.isEmpty()) {
             sendWebhook(
-                "🌾 **FarmBot Started!**\\n" +
-                "👤 Player: **" + minecraftUsername + "**\\n" +
+                "🌾 **FarmBot Started!**\n" +
+                "👤 Player: **" + minecraftUsername + "**\n" +
                 "⏱ Session limit: **" +
-                (sessionLimitMinutes > 0 ? sessionLimitMinutes + " min" : "Unlimited") + "**\\n" +
+                (sessionLimitMinutes > 0 ? sessionLimitMinutes + " min" : "Unlimited") + "**\n" +
                 "🖱 Click speed: **" + clickSpeedMin + "–" + clickSpeedMax + "s**"
             );
         }
@@ -317,12 +318,10 @@ public class FarmBotMod implements ClientModInitializer {
         stopMovement();
         pressKey(GLFW.GLFW_KEY_SPACE, false);
         jumpHoldTicks = 0;
-
-        // Fetch balance after
         waitingForBalAfter = true;
         balCheckDelay = 20;
-
-        client.player.sendMessage(Text.literal("§c[FarmBot] Stopped. Fetching balance..."), true);
+        client.player.sendMessage(
+            Text.literal("§c[FarmBot] Stopped. Fetching balance..."), true);
     }
 
     private void onBalanceAfterReceived() {
@@ -337,14 +336,13 @@ public class FarmBotMod implements ClientModInitializer {
 
         if (notifySessionEnd && !webhookUrl.isEmpty()) {
             sendWebhook(
-                "⏹ **FarmBot Session Complete!**\\n" +
-                "👤 Player: **" + minecraftUsername + "**\\n" +
-                "⏱ Duration: **" + duration + "**\\n" +
-                "🌾 Rows: **" + rowCount + "** | Clicks: **" + clickCount + "**\\n" +
-                "\\n" +
-                "💰 Balance Before: **$" + formatMoney(balanceBefore) + "**\\n" +
-                "💰 Balance After:  **$" + formatMoney(balanceAfter) + "**\\n" +
-                "📈 Profit Made:    **+$" + formatMoney(profit) + "**\\n" +
+                "⏹ **FarmBot Session Complete!**\n" +
+                "👤 Player: **" + minecraftUsername + "**\n" +
+                "⏱ Duration: **" + duration + "**\n" +
+                "🌾 Rows: **" + rowCount + "** | Clicks: **" + clickCount + "**\n\n" +
+                "💰 Balance Before: **$" + formatMoney(balanceBefore) + "**\n" +
+                "💰 Balance After:  **$" + formatMoney(balanceAfter) + "**\n" +
+                "📈 Profit Made:    **+$" + formatMoney(profit) + "**\n" +
                 "⚡ Per Minute:     **$" + formatMoney(perMin) + "/min**"
             );
         }
@@ -363,11 +361,6 @@ public class FarmBotMod implements ClientModInitializer {
         }
     }
 
-    private static void sendCommand(MinecraftClient client, String command) {
-        if (client.player == null) return;
-        client.player.networkHandler.sendCommand(command.substring(1));
-    }
-
     private static String formatTime(long secs) {
         return String.format("%02d:%02d", secs / 60, secs % 60);
     }
@@ -378,7 +371,9 @@ public class FarmBotMod implements ClientModInitializer {
 
     private static void sendWebhook(String message) {
         if (webhookUrl == null || webhookUrl.isEmpty()) return;
-        String json = "{\"content\":\"" + message + "\"}";
+        String json = "{\"content\":\"" +
+            message.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") +
+            "\"}";
         HttpClient httpClient = HttpClient.newHttpClient();
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(webhookUrl))
@@ -394,13 +389,13 @@ public class FarmBotMod implements ClientModInitializer {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return;
 
-        int x = 10, y = 10, w = 200, h = botActive ? 175 : 60;
+        int x = 10, y = 10, w = 240, h = botActive ? 200 : 55;
         context.fill(x, y, x + w, y + h, 0xCC0a0a1a);
-        context.fill(x, y, x + w, y + 2, 0xFF6666dd);
-        context.drawBorder(x, y, w, h, 0xFF2a2a6a);
+        context.fill(x, y, x + w, y + 2, 0xFF00ff88);
+        context.drawBorder(x, y, w, h, 0xFF00ff44);
 
         context.drawText(client.textRenderer,
-            Text.literal("§b🌾 §fFarmBot §7| §eJ§f=open"),
+            Text.literal("§a🌾 FarmBot §7| §eH§f=toggle §eG§f=hud §eJ§f=config"),
             x + 6, y + 6, 0xFFFFFF, false);
 
         String status = botActive
@@ -412,269 +407,227 @@ public class FarmBotMod implements ClientModInitializer {
         if (botActive) {
             long elapsed = (System.currentTimeMillis() - startTime) / 1000;
             context.drawText(client.textRenderer,
-                Text.literal("§7" + formatTime(elapsed) + " §8| §7rows:§f" + rowCount + " §8| §7clicks:§f" + clickCount),
-                x + 6, y + 30, 0xFFFFFF, false);
+                Text.literal(String.format("§7Time:   §f%s%s", formatTime(elapsed),
+                    sessionLimitMinutes > 0 ? " §7/ §e" + sessionLimitMinutes + "min" : "")),
+                x + 6, y + 31, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
-                Text.literal("§7dir: §f" + (goingRight ? "→R" : "←L") +
-                    " §8| §7jump: §f" + (jumpHoldTicks > 0 ? "§bHOLD" : jumpCooldown > 0 ? "§7cd" : "§aOK")),
-                x + 6, y + 42, 0xFFFFFF, false);
+                Text.literal("§7Rows:   §f" + rowCount), x + 6, y + 41, 0xFFFFFF, false);
+            context.drawText(client.textRenderer,
+                Text.literal("§7Clicks: §f" + clickCount), x + 6, y + 51, 0xFFFFFF, false);
+            context.drawText(client.textRenderer,
+                Text.literal("§7Dir:    §f" + (goingRight ? "→ Right (D)" : "← Left (A)")),
+                x + 6, y + 61, 0xFFFFFF, false);
+            context.drawText(client.textRenderer,
+                Text.literal("§7Jump:   §f" + (jumpHoldTicks > 0
+                    ? "§bHOLDING (" + jumpHoldTicks + ")"
+                    : jumpCooldown > 0 ? "§7cooldown (" + jumpCooldown + ")" : "§aready")),
+                x + 6, y + 71, 0xFFFFFF, false);
+            context.drawText(client.textRenderer,
+                Text.literal(String.format("§7Stuck:  §f%d§7/§f%d", stuckTicks, STUCK_THRESHOLD)),
+                x + 6, y + 81, 0xFFFFFF, false);
+            context.fill(x + 4, y + 93, x + w - 4, y + 94, 0xFF333355);
+            context.drawText(client.textRenderer,
+                Text.literal(String.format("§7X:§f%.1f §7Z:§f%.1f §7Y:§f%.1f",
+                    client.player.getX(), client.player.getZ(), client.player.getY())),
+                x + 6, y + 97, 0xFFFFFF, false);
+            context.fill(x + 4, y + 109, x + w - 4, y + 110, 0xFF333355);
             if (balanceCurrent > 0) {
                 long profit = balanceCurrent - balanceBefore;
                 context.drawText(client.textRenderer,
-                    Text.literal("§7bal: §e$" + formatMoney(balanceCurrent) +
-                        (profit > 0 ? " §a(+" + formatMoney(profit) + ")" : "")),
-                    x + 6, y + 54, 0xFFFFFF, false);
+                    Text.literal("§7Bal: §e$" + formatMoney(balanceCurrent)),
+                    x + 6, y + 113, 0xFFFFFF, false);
+                if (profit > 0) {
+                    context.drawText(client.textRenderer,
+                        Text.literal("§7Profit: §a+$" + formatMoney(profit)),
+                        x + 6, y + 123, 0xFFFFFF, false);
+                }
             }
+            context.fill(x + 4, y + 136, x + w - 4, y + 137, 0xFF333355);
             context.drawText(client.textRenderer,
-                Text.literal(String.format("§7X:§f%.0f §7Z:§f%.0f §7Y:§f%.0f",
-                    client.player.getX(), client.player.getZ(), client.player.getY())),
-                x + 6, y + 66, 0xFFFFFF, false);
+                Text.literal("§7Checks: §e" + activityCheckCount),
+                x + 6, y + 140, 0xFFFFFF, false);
             context.drawText(client.textRenderer,
-                Text.literal("§7checks: §e" + activityCheckCount),
-                x + 6, y + 78, 0xFFFFFF, false);
+                Text.literal("§7Webhook: " + (webhookUrl.isEmpty() ? "§cNot set" : "§aSet ✔")),
+                x + 6, y + 150, 0xFFFFFF, false);
+
+            // Session history summary
+            if (!sessionHistory.isEmpty()) {
+                context.fill(x + 4, y + 163, x + w - 4, y + 164, 0xFF333355);
+                SessionRecord last = sessionHistory.get(0);
+                context.drawText(client.textRenderer,
+                    Text.literal("§7Last: §a+$" + formatMoney(last.profit) + " §7in §f" + last.duration),
+                    x + 6, y + 167, 0xFFFFFF, false);
+            }
         }
     }
 
-    // ── Main GUI Screen ───────────────────────────────────────────────────────
-    public static class FarmBotScreen extends Screen {
+    // ── Config Screen ─────────────────────────────────────────────────────────
+    public static class FarmConfigScreen extends Screen {
         private final Screen parent;
-        private int activeTab = 0; // 0=dashboard, 1=config, 2=stats
         private TextFieldWidget clickMinField, clickMaxField, sessionField, webhookField, usernameField;
 
-        public FarmBotScreen(Screen parent) {
-            super(Text.literal("FarmBot"));
+        public FarmConfigScreen(Screen parent) {
+            super(Text.literal("FarmBot Config"));
             this.parent = parent;
         }
 
         @Override
         protected void init() {
             int cx = width / 2, cy = height / 2;
-            int pw = 320, ph = 340;
-            int px = cx - pw/2, py = cy - ph/2;
 
-            // Config fields
-            clickMinField = new TextFieldWidget(textRenderer, px + 12, py + 105, 140, 16, Text.literal(""));
+            clickMinField = new TextFieldWidget(textRenderer, cx - 100, cy - 90, 95, 16, Text.literal(""));
             clickMinField.setText(String.valueOf(clickSpeedMin));
             clickMinField.setMaxLength(10);
+            addDrawableChild(clickMinField);
 
-            clickMaxField = new TextFieldWidget(textRenderer, px + 164, py + 105, 144, 16, Text.literal(""));
+            clickMaxField = new TextFieldWidget(textRenderer, cx + 5, cy - 90, 95, 16, Text.literal(""));
             clickMaxField.setText(String.valueOf(clickSpeedMax));
             clickMaxField.setMaxLength(10);
+            addDrawableChild(clickMaxField);
 
-            sessionField = new TextFieldWidget(textRenderer, px + 12, py + 140, 140, 16, Text.literal(""));
+            sessionField = new TextFieldWidget(textRenderer, cx - 100, cy - 55, 95, 16, Text.literal(""));
             sessionField.setText(String.valueOf(sessionLimitMinutes));
             sessionField.setMaxLength(6);
+            addDrawableChild(sessionField);
 
-            usernameField = new TextFieldWidget(textRenderer, px + 164, py + 140, 144, 16, Text.literal(""));
+            usernameField = new TextFieldWidget(textRenderer, cx + 5, cy - 55, 95, 16, Text.literal(""));
             usernameField.setText(minecraftUsername);
             usernameField.setMaxLength(32);
+            addDrawableChild(usernameField);
 
-            webhookField = new TextFieldWidget(textRenderer, px + 12, py + 175, 296, 16, Text.literal(""));
+            webhookField = new TextFieldWidget(textRenderer, cx - 100, cy - 20, 200, 16, Text.literal(""));
             webhookField.setText(webhookUrl);
             webhookField.setMaxLength(512);
-
-            // Tab buttons
-            addDrawableChild(ButtonWidget.builder(Text.literal("Dashboard"),
-                btn -> activeTab = 0).dimensions(px, py + 30, 107, 18).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Config"),
-                btn -> { activeTab = 1; addConfigFields(); }).dimensions(px + 107, py + 30, 106, 18).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Stats"),
-                btn -> activeTab = 2).dimensions(px + 213, py + 30, 107, 18).build());
-
-            // Save button
-            addDrawableChild(ButtonWidget.builder(Text.literal("Save & Close"), btn -> {
-                saveConfig();
-                close();
-            }).dimensions(px + pw/2 - 60, py + ph - 26, 120, 18).build());
-        }
-
-        private void addConfigFields() {
-            addDrawableChild(clickMinField);
-            addDrawableChild(clickMaxField);
-            addDrawableChild(sessionField);
-            addDrawableChild(usernameField);
             addDrawableChild(webhookField);
-        }
 
-        private void saveConfig() {
-            try { clickSpeedMin = Float.parseFloat(clickMinField.getText()); } catch (Exception ignored) {}
-            try { clickSpeedMax = Float.parseFloat(clickMaxField.getText()); } catch (Exception ignored) {}
-            try { sessionLimitMinutes = Integer.parseInt(sessionField.getText()); } catch (Exception ignored) {}
-            minecraftUsername = usernameField.getText().trim();
-            webhookUrl = webhookField.getText().trim();
+            addDrawableChild(ButtonWidget.builder(Text.literal("✔ Save & Close"), btn -> {
+                try { clickSpeedMin = Math.max(0.05f, Float.parseFloat(clickMinField.getText())); }
+                catch (Exception ignored) {}
+                try { clickSpeedMax = Math.max(clickSpeedMin, Float.parseFloat(clickMaxField.getText())); }
+                catch (Exception ignored) {}
+                try { sessionLimitMinutes = Math.max(0, Integer.parseInt(sessionField.getText())); }
+                catch (Exception ignored) {}
+                minecraftUsername = usernameField.getText().trim();
+                webhookUrl = webhookField.getText().trim();
+                close();
+            }).dimensions(cx - 60, cy + 15, 120, 18).build());
+
+            addDrawableChild(ButtonWidget.builder(Text.literal("✖ Cancel"), btn -> close())
+                .dimensions(cx - 60, cy + 38, 120, 18).build());
+
+            // Stats button
+            addDrawableChild(ButtonWidget.builder(Text.literal("📊 View Stats"), btn ->
+                client.setScreen(new StatsScreen(this))
+            ).dimensions(cx - 60, cy + 61, 120, 18).build());
         }
 
         @Override
         public void render(DrawContext ctx, int mx, int my, float delta) {
             int cx = width / 2, cy = height / 2;
-            int pw = 320, ph = 340;
-            int px = cx - pw/2, py = cy - ph/2;
+            ctx.fill(cx - 115, cy - 110, cx + 115, cy + 88, 0xEE0a0a1a);
+            ctx.fill(cx - 115, cy - 110, cx + 115, cy - 108, 0xFF00ff88);
+            ctx.drawBorder(cx - 115, cy - 110, 230, 198, 0xFF00ff44);
 
-            // Background panel
-            ctx.fill(px, py, px + pw, py + ph, 0xEE0d0d1a);
-            ctx.fill(px, py, px + pw, py + 3, 0xFF6666dd);
-            ctx.drawBorder(px, py, pw, ph, 0xFF2a2a6a);
-
-            // Title
             ctx.drawCenteredTextWithShadow(textRenderer,
-                Text.literal("§b🌾 §fFarmBot"), cx, py + 10, 0xFFFFFF);
+                Text.literal("§a🌾 FarmBot Config"), cx, cy - 103, 0xFFFFFF);
 
-            // Tab indicator
-            int[] tabX = {px, px+107, px+213};
-            int[] tabW = {107, 106, 107};
-            for (int i = 0; i < 3; i++) {
-                if (activeTab == i) ctx.fill(tabX[i], py + 48, tabX[i] + tabW[i], py + 50, 0xFF6666dd);
-            }
-
-            // Content
-            if (activeTab == 0) renderDashboard(ctx, px, py, pw);
-            else if (activeTab == 1) renderConfig(ctx, px, py, pw);
-            else renderStats(ctx, px, py, pw);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7Click Min §8(sec):"), cx - 100, cy - 102, 0xFFFFFF);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7Click Max §8(sec):"), cx + 5, cy - 102, 0xFFFFFF);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7Session §8(min, 0=∞):"), cx - 100, cy - 67, 0xFFFFFF);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7MC Username:"), cx + 5, cy - 67, 0xFFFFFF);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7Discord Webhook URL:"), cx - 100, cy - 32, 0xFFFFFF);
 
             super.render(ctx, mx, my, delta);
         }
 
-        private void renderDashboard(DrawContext ctx, int px, int py, int pw) {
-            MinecraftClient client = MinecraftClient.getInstance();
-            int y = py + 58;
+        @Override
+        public void close() { client.setScreen(parent); }
+    }
 
-            // Status
-            String status = botActive ? "§a● RUNNING" : "§c● STOPPED";
-            ctx.drawCenteredTextWithShadow(textRenderer, Text.literal(status), px + pw/2, y, 0xFFFFFF);
-            y += 16;
+    // ── Stats Screen ──────────────────────────────────────────────────────────
+    public static class StatsScreen extends Screen {
+        private final Screen parent;
 
-            // Start hint
-            ctx.fill(px + 10, y, px + pw - 10, y + 24, 0xFF11112a);
-            ctx.drawBorder(px + 10, y, pw - 20, 24, botActive ? 0xFF3a1a2a : 0xFF2a2a5a);
+        public StatsScreen(Screen parent) {
+            super(Text.literal("FarmBot Stats"));
+            this.parent = parent;
+        }
+
+        @Override
+        protected void init() {
+            int cx = width / 2, cy = height / 2;
+            addDrawableChild(ButtonWidget.builder(Text.literal("← Back"), btn -> close())
+                .dimensions(cx - 60, cy + 90, 120, 18).build());
+        }
+
+        @Override
+        public void render(DrawContext ctx, int mx, int my, float delta) {
+            int cx = width / 2, cy = height / 2;
+            ctx.fill(cx - 130, cy - 115, cx + 130, cy + 115, 0xEE0a0a1a);
+            ctx.fill(cx - 130, cy - 115, cx + 130, cy - 113, 0xFF00ff88);
+            ctx.drawBorder(cx - 130, cy - 115, 260, 230, 0xFF00ff44);
+
             ctx.drawCenteredTextWithShadow(textRenderer,
-                Text.literal(botActive ? "§cStop Farming  §7[press H]" : "§7Start Farming  §8[press H]"),
-                px + pw/2, y + 8, 0xFFFFFF);
-            y += 34;
-
-            // Stat grid
-            String[][] stats = {
-                {"Time", botActive ? formatTime((System.currentTimeMillis()-startTime)/1000) : "00:00"},
-                {"Rows", String.valueOf(rowCount)},
-                {"Clicks", String.valueOf(clickCount)},
-                {"Checks", String.valueOf(activityCheckCount)}
-            };
-            for (int i = 0; i < 4; i++) {
-                int sx = px + 10 + (i % 2) * 150;
-                int sy = y + (i / 2) * 44;
-                ctx.fill(sx, sy, sx + 145, sy + 38, 0xFF11112a);
-                ctx.drawBorder(sx, sy, 145, 38, 0xFF1e1e3a);
-                ctx.drawText(textRenderer, Text.literal("§7" + stats[i][0]), sx + 8, sy + 6, 0xFFFFFF, false);
-                ctx.drawText(textRenderer, Text.literal("§f" + stats[i][1]), sx + 8, sy + 20, 0xFFFFFF, false);
-            }
-            y += 96;
-
-            // Balance
-            if (balanceCurrent > 0) {
-                long profit = balanceCurrent - balanceBefore;
-                ctx.fill(px + 10, y, px + pw - 10, y + 28, 0xFF0a1a0a);
-                ctx.drawBorder(px + 10, y, pw - 20, 28, 0xFF1a4a2a);
-                ctx.drawText(textRenderer,
-                    Text.literal("§7Balance: §e$" + formatMoney(balanceCurrent) +
-                        (profit > 0 ? "  §a(+" + formatMoney(profit) + ")" : "")),
-                    px + 18, y + 10, 0xFFFFFF, false);
-                y += 36;
-            }
-
-            // Position
-            if (client.player != null) {
-                ctx.drawText(textRenderer,
-                    Text.literal(String.format("§7X:§f%.0f  §7Z:§f%.0f  §7Y:§f%.0f",
-                        client.player.getX(), client.player.getZ(), client.player.getY())),
-                    px + 18, y + 4, 0xFFFFFF, false);
-            }
-        }
-
-        private void renderConfig(DrawContext ctx, int px, int py, int pw) {
-            int y = py + 58;
-            ctx.drawText(textRenderer, Text.literal("§7Click Speed Min"), px + 12, y + 4, 0xAAAAAA, false);
-            ctx.drawText(textRenderer, Text.literal("§7Click Speed Max"), px + 164, y + 4, 0xAAAAAA, false);
-            y += 14;
-            ctx.fill(px + 12, y, px + 152, y + 16, 0xFF0a0a1a);
-            ctx.fill(px + 164, y, px + 308, y + 16, 0xFF0a0a1a);
-            y += 24;
-            ctx.drawText(textRenderer, Text.literal("§7Session Limit (min)"), px + 12, y + 4, 0xAAAAAA, false);
-            ctx.drawText(textRenderer, Text.literal("§7Minecraft Username"), px + 164, y + 4, 0xAAAAAA, false);
-            y += 14;
-            ctx.fill(px + 12, y, px + 152, y + 16, 0xFF0a0a1a);
-            ctx.fill(px + 164, y, px + 308, y + 16, 0xFF0a0a1a);
-            y += 24;
-            ctx.drawText(textRenderer, Text.literal("§7Discord Webhook URL"), px + 12, y + 4, 0xAAAAAA, false);
-            y += 14;
-            ctx.fill(px + 12, y, px + 308, y + 16, 0xFF0a0a1a);
-            y += 28;
-
-            // Toggles
-            String[][] toggles = {
-                {"Ping @everyone on activity check", notifyActivityCheck ? "§aON" : "§cOFF"},
-                {"Notify on session end", notifySessionEnd ? "§aON" : "§cOFF"},
-                {"Notify on bot start", notifyBotStart ? "§aON" : "§cOFF"}
-            };
-            for (String[] t : toggles) {
-                ctx.drawText(textRenderer, Text.literal("§7" + t[0]), px + 12, y + 4, 0xAAAAAA, false);
-                ctx.drawText(textRenderer, Text.literal(t[1]), px + pw - 30, y + 4, 0xFFFFFF, false);
-                y += 18;
-            }
-        }
-
-        private void renderStats(DrawContext ctx, int px, int py, int pw) {
-            int y = py + 58;
+                Text.literal("§a📊 Session Stats"), cx, cy - 108, 0xFFFFFF);
 
             long profit = balanceAfter > 0 ? balanceAfter - balanceBefore : 0;
             long elapsed = (System.currentTimeMillis() - startTime) / 1000;
-            long perMin = elapsed > 60 ? (profit * 60) / elapsed : 0;
+            long perMin = elapsed > 0 ? (profit * 60) / elapsed : 0;
 
-            // Big profit card
-            ctx.fill(px + 10, y, px + pw - 10, y + 50, 0xFF0a1a0a);
-            ctx.drawBorder(px + 10, y, pw - 20, 50, 0xFF1a4a2a);
-            ctx.drawText(textRenderer, Text.literal("§7Total Profit This Session"), px + 18, y + 8, 0x44aa44, false);
-            ctx.drawText(textRenderer,
-                Text.literal("§a+" + (profit > 0 ? "$" + formatMoney(profit) : "$0")),
-                px + 18, y + 22, 0xFFFFFF, false);
-            ctx.drawText(textRenderer,
-                Text.literal("§7Per min: §a$" + formatMoney(perMin)),
-                px + 18, y + 36, 0xFFFFFF, false);
-            y += 58;
+            int y = cy - 90;
+            ctx.fill(cx - 120, y, cx + 120, y + 40, 0xFF0a1a0a);
+            ctx.drawBorder(cx - 120, y, 240, 40, 0xFF1a4a2a);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7Total Profit"), cx - 112, y + 6, 0x44aa44);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§a+$" + formatMoney(Math.max(0, profit))), cx - 112, y + 20, 0xFFFFFF);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7$" + formatMoney(perMin) + "/min"), cx + 30, y + 20, 0x44aa44);
+            y += 48;
 
-            // Balance rows
-            ctx.fill(px + 10, y, px + pw - 10, y + 60, 0xFF0a0a1a);
-            ctx.drawBorder(px + 10, y, pw - 20, 60, 0xFF1e1e3a);
-            ctx.drawText(textRenderer, Text.literal("§7Before"), px + 18, y + 8, 0xAAAAAA, false);
-            ctx.drawText(textRenderer,
+            ctx.fill(cx - 120, y, cx + 120, y + 54, 0xFF0a0a1a);
+            ctx.drawBorder(cx - 120, y, 240, 54, 0xFF1e1e3a);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("§7Before:"), cx - 112, y + 6, 0xAAAAAA);
+            ctx.drawTextWithShadow(textRenderer,
                 Text.literal(balanceBefore > 0 ? "§f$" + formatMoney(balanceBefore) : "§8—"),
-                px + pw - 20 - textRenderer.getWidth(balanceBefore > 0 ? "$"+formatMoney(balanceBefore) : "—"), y + 8, 0xFFFFFF, false);
-            ctx.fill(px + 18, y + 22, px + pw - 18, y + 23, 0xFF1a1a3a);
-            ctx.drawText(textRenderer, Text.literal("§7After"), px + 18, y + 28, 0xAAAAAA, false);
-            ctx.drawText(textRenderer,
+                cx + 20, y + 6, 0xFFFFFF);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("§7After:"), cx - 112, y + 22, 0xAAAAAA);
+            ctx.drawTextWithShadow(textRenderer,
                 Text.literal(balanceAfter > 0 ? "§f$" + formatMoney(balanceAfter) : "§8—"),
-                px + pw - 20 - textRenderer.getWidth(balanceAfter > 0 ? "$"+formatMoney(balanceAfter) : "—"), y + 28, 0xFFFFFF, false);
-            ctx.fill(px + 18, y + 44, px + pw - 18, y + 45, 0xFF1a1a3a);
-            ctx.drawText(textRenderer, Text.literal("§7Profit"), px + 18, y + 50, 0xAAAAAA, false);
-            ctx.drawText(textRenderer,
+                cx + 20, y + 22, 0xFFFFFF);
+            ctx.drawTextWithShadow(textRenderer, Text.literal("§7Profit:"), cx - 112, y + 38, 0xAAAAAA);
+            ctx.drawTextWithShadow(textRenderer,
                 Text.literal(profit > 0 ? "§a+$" + formatMoney(profit) : "§8—"),
-                px + pw - 20 - textRenderer.getWidth(profit > 0 ? "+$"+formatMoney(profit) : "—"), y + 50, 0xFFFFFF, false);
-            y += 68;
+                cx + 20, y + 38, 0xFFFFFF);
+            y += 62;
 
-            // History
-            ctx.drawText(textRenderer, Text.literal("§7Session History"), px + 12, y, 0x4444aa, false);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7Session History"), cx - 120, y, 0x4444aa);
             y += 12;
+
             if (sessionHistory.isEmpty()) {
-                ctx.drawText(textRenderer, Text.literal("§8No sessions yet"), px + 12, y + 4, 0xFFFFFF, false);
+                ctx.drawTextWithShadow(textRenderer,
+                    Text.literal("§8No sessions yet"), cx - 120, y, 0xFFFFFF);
             } else {
                 for (int i = 0; i < Math.min(sessionHistory.size(), 4); i++) {
                     SessionRecord r = sessionHistory.get(i);
-                    ctx.fill(px + 10, y, px + pw - 10, y + 20, 0xFF0a0a1a);
-                    ctx.drawBorder(px + 10, y, pw - 20, 20, 0xFF1a1a3a);
-                    ctx.drawText(textRenderer, Text.literal("§8" + r.time), px + 16, y + 6, 0xFFFFFF, false);
-                    ctx.drawText(textRenderer, Text.literal("§a+$" + formatMoney(r.profit)), px + 90, y + 6, 0xFFFFFF, false);
-                    ctx.drawText(textRenderer, Text.literal("§7" + r.duration), px + pw - 50, y + 6, 0xFFFFFF, false);
-                    y += 24;
+                    ctx.fill(cx - 120, y, cx + 120, y + 18, 0xFF0a0a1a);
+                    ctx.drawBorder(cx - 120, y, 240, 18, 0xFF1a1a3a);
+                    ctx.drawTextWithShadow(textRenderer,
+                        Text.literal("§8" + r.time), cx - 114, y + 5, 0xFFFFFF);
+                    ctx.drawTextWithShadow(textRenderer,
+                        Text.literal("§a+$" + formatMoney(r.profit)), cx - 60, y + 5, 0xFFFFFF);
+                    ctx.drawTextWithShadow(textRenderer,
+                        Text.literal("§7" + r.duration), cx + 70, y + 5, 0xFFFFFF);
+                    y += 22;
                 }
             }
+            super.render(ctx, mx, my, delta);
         }
 
         @Override
