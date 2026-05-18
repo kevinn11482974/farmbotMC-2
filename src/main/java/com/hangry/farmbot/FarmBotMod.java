@@ -15,11 +15,16 @@ import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.mob.MobEntity;
+import net.minecraft.item.FishingRodItem;
+import net.minecraft.item.Items;
+import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import org.lwjgl.glfw.GLFW;
 
@@ -39,7 +44,7 @@ import java.util.regex.Pattern;
 public class FarmBotMod implements ClientModInitializer {
 
     // ── Mode ──────────────────────────────────────────────────────────────────
-    public enum BotMode { NONE, FARM, SLAY }
+    public enum BotMode { NONE, FARM, SLAY, LOG, FISH }
     public static BotMode currentMode = BotMode.NONE;
     public static boolean botActive = false;
     public static boolean showGui = true;
@@ -53,6 +58,10 @@ public class FarmBotMod implements ClientModInitializer {
     public static boolean notifyActivityCheck = true;
     public static boolean notifySessionEnd = true;
     public static boolean notifyBotStart = false;
+
+    // ── Log settings ──────────────────────────────────────────────────────────
+    public static int logScanRadius = 200;
+    public static int logMinHeight = 8;
 
     // ── Slay settings ─────────────────────────────────────────────────────────
     public static float slayCpsMin = 3f;
@@ -91,6 +100,31 @@ public class FarmBotMod implements ClientModInitializer {
     private static float yawWobble = 0f;
     private static int wobbleTimer = 0;
     private static String targetName = "";
+
+    // ── Fish state ────────────────────────────────────────────────────────────
+    public enum FishingState { CASTING, WAITING, REELING }
+    private static FishingState fishingState = FishingState.CASTING;
+    private static int fishingCastDelay = 0;
+    private static int fishingReelDelay = 0;
+    private static double lastBobberY = 0;
+    private static int fishCount = 0;
+
+    // ── Log state ─────────────────────────────────────────────────────────────
+    public enum LogState { SCANNING, WALKING, CHOPPING, WAITING_CHOP, REPLANTING, WAITING_GROWTH }
+    private static LogState logState = LogState.SCANNING;
+    private static BlockPos targetTreePos = null;
+    private static final List<BlockPos> treeQueue = new ArrayList<>();
+    private static final List<BlockPos> stumpList = new ArrayList<>();
+    private static int sublamateMessageCount = 0;
+    private static long lastSublamateTime = 0;
+    private static int chopWaitTicks = 0;
+    private static int growthWaitTicks = 0;
+    private static int walkStuckTicks = 0;
+    private static int replantIndex = 0;
+    private static int treesChopped = 0;
+    private static int logShopDelay = 0;
+    private static int logBuyPhase = 0;
+    private static double logLastX = 0, logLastZ = 0;
 
     // ── Balance tracking ──────────────────────────────────────────────────────
     private static long balanceBefore = 0;
@@ -156,6 +190,11 @@ public class FarmBotMod implements ClientModInitializer {
                         onBalanceAfterReceived();
                     }
                 } catch (Exception ignored) {}
+            }
+            // Sublimate III log chop detection
+            if (raw.contains("Sublimate III has turned the log")) {
+                sublamateMessageCount++;
+                lastSublamateTime = System.currentTimeMillis();
             }
             // Backpack (action bar)
             if (overlay && raw.contains("Backpack")) {
@@ -260,8 +299,10 @@ public class FarmBotMod implements ClientModInitializer {
         if (!botActive) return;
 
         // Route to mode
-        if (currentMode == BotMode.FARM) tickFarm(client);
+        if      (currentMode == BotMode.FARM) tickFarm(client);
         else if (currentMode == BotMode.SLAY) tickSlay(client);
+        else if (currentMode == BotMode.LOG)  tickLog(client);
+        else if (currentMode == BotMode.FISH) tickFish(client);
     }
 
     // ── Farm tick ─────────────────────────────────────────────────────────────
@@ -437,6 +478,245 @@ public class FarmBotMod implements ClientModInitializer {
         }
     }
 
+    // ── Log tick ──────────────────────────────────────────────────────────────
+    private void tickLog(MinecraftClient client) {
+        if (client.world == null) return;
+        if (logShopDelay > 0) { logShopDelay--; return; }
+
+        switch (logState) {
+            case SCANNING -> {
+                treeQueue.clear();
+                BlockPos pp = client.player.getBlockPos();
+                int r = logScanRadius;
+                for (int dx = -r; dx <= r; dx++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        for (int dy = -5; dy <= 25; dy++) {
+                            BlockPos base = pp.add(dx, dy, dz);
+                            if (client.world.getBlockState(base).isIn(BlockTags.LOGS)) {
+                                int h = 0;
+                                for (int i = 0; i < 40; i++) {
+                                    if (client.world.getBlockState(base.up(i)).isIn(BlockTags.LOGS)) h++;
+                                    else break;
+                                }
+                                if (h >= logMinHeight) treeQueue.add(base);
+                                break;
+                            }
+                        }
+                    }
+                }
+                treeQueue.sort(Comparator.comparingDouble(p -> pp.getSquaredDistance(p)));
+                List<BlockPos> deduped = new ArrayList<>();
+                for (BlockPos t : treeQueue) {
+                    boolean dup = deduped.stream().anyMatch(
+                        d -> Math.abs(d.getX()-t.getX()) < 4 && Math.abs(d.getZ()-t.getZ()) < 4);
+                    if (!dup) deduped.add(t);
+                }
+                treeQueue.clear(); treeQueue.addAll(deduped);
+                if (treeQueue.isEmpty()) {
+                    logState = stumpList.isEmpty() ? LogState.WAITING_GROWTH : LogState.REPLANTING;
+                    replantIndex = 0;
+                } else {
+                    targetTreePos = treeQueue.remove(0);
+                    logLastX = client.player.getX(); logLastZ = client.player.getZ();
+                    walkStuckTicks = 0;
+                    logState = LogState.WALKING;
+                }
+            }
+
+            case WALKING -> {
+                if (targetTreePos == null) { logState = LogState.SCANNING; return; }
+                double dx = targetTreePos.getX() + 0.5 - client.player.getX();
+                double dz = targetTreePos.getZ() + 0.5 - client.player.getZ();
+                double dist = Math.sqrt(dx*dx + dz*dz);
+                if (dist <= 4.0) {
+                    stopAllMovement();
+                    pressKey(GLFW.GLFW_KEY_SPACE, false);
+                    walkStuckTicks = 0;
+                    sublamateMessageCount = 0;
+                    lastSublamateTime = System.currentTimeMillis();
+                    chopWaitTicks = 0;
+                    logState = LogState.CHOPPING;
+                    return;
+                }
+                float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                client.player.setYaw(yaw);
+                client.player.setPitch(-10f);
+                pressKey(GLFW.GLFW_KEY_W, true);
+                double moved = Math.abs(client.player.getX()-logLastX) + Math.abs(client.player.getZ()-logLastZ);
+                logLastX = client.player.getX(); logLastZ = client.player.getZ();
+                if (moved < 0.05) {
+                    walkStuckTicks++;
+                    if (walkStuckTicks >= 3) pressKey(GLFW.GLFW_KEY_SPACE, true);
+                    if (walkStuckTicks >= 8)
+                        pressKey(walkStuckTicks % 4 < 2 ? GLFW.GLFW_KEY_A : GLFW.GLFW_KEY_D, true);
+                } else {
+                    if (walkStuckTicks > 0) {
+                        walkStuckTicks = 0;
+                        pressKey(GLFW.GLFW_KEY_SPACE, false);
+                        pressKey(GLFW.GLFW_KEY_A, false);
+                        pressKey(GLFW.GLFW_KEY_D, false);
+                    }
+                }
+            }
+
+            case CHOPPING -> {
+                if (targetTreePos == null) { logState = LogState.SCANNING; return; }
+                stopAllMovement();
+                double dx = targetTreePos.getX() + 0.5 - client.player.getX();
+                double dy = (targetTreePos.getY() + logMinHeight / 2.0)
+                           - (client.player.getY() + client.player.getStandingEyeHeight());
+                double dz = targetTreePos.getZ() + 0.5 - client.player.getZ();
+                double hd = Math.sqrt(dx*dx + dz*dz);
+                client.player.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
+                client.player.setPitch((float)(-Math.toDegrees(Math.atan2(dy, hd))));
+                if (client.crosshairTarget != null &&
+                        client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
+                    BlockHitResult bhr = (BlockHitResult) client.crosshairTarget;
+                    if (client.world.getBlockState(bhr.getBlockPos()).isIn(BlockTags.LOGS)) {
+                        client.interactionManager.attackBlock(bhr.getBlockPos(), bhr.getSide());
+                        client.player.swingHand(Hand.MAIN_HAND);
+                        clickCount++;
+                    }
+                }
+                logState = LogState.WAITING_CHOP;
+            }
+
+            case WAITING_CHOP -> {
+                if (targetTreePos == null) { logState = LogState.SCANNING; return; }
+                stopAllMovement();
+                if (client.crosshairTarget != null &&
+                        client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
+                    BlockHitResult bhr = (BlockHitResult) client.crosshairTarget;
+                    if (client.world.getBlockState(bhr.getBlockPos()).isIn(BlockTags.LOGS)) {
+                        client.interactionManager.attackBlock(bhr.getBlockPos(), bhr.getSide());
+                        client.player.swingHand(Hand.MAIN_HAND);
+                        clickCount++;
+                    }
+                }
+                chopWaitTicks++;
+                boolean chopDone = sublamateMessageCount > 0
+                    && (System.currentTimeMillis() - lastSublamateTime) > 1000;
+                boolean timeout  = chopWaitTicks > 200 && sublamateMessageCount == 0;
+                if (chopDone || timeout) {
+                    if (chopDone) { treesChopped++; stumpList.add(targetTreePos); }
+                    targetTreePos = null;
+                    if (!treeQueue.isEmpty()) {
+                        targetTreePos = treeQueue.remove(0);
+                        logLastX = client.player.getX(); logLastZ = client.player.getZ();
+                        walkStuckTicks = 0;
+                        sublamateMessageCount = 0;
+                        lastSublamateTime = System.currentTimeMillis();
+                        chopWaitTicks = 0;
+                        logState = LogState.WALKING;
+                    } else {
+                        logState = stumpList.isEmpty() ? LogState.SCANNING : LogState.REPLANTING;
+                        replantIndex = 0;
+                    }
+                }
+            }
+
+            case REPLANTING -> {
+                int saplingSlot = -1;
+                for (int i = 0; i < 9; i++) {
+                    if (client.player.getInventory().getStack(i).getItem() == Items.SPRUCE_SAPLING) {
+                        saplingSlot = i; break;
+                    }
+                }
+                if (saplingSlot == -1) {
+                    if (logBuyPhase == 0) {
+                        client.player.networkHandler.sendCommand("sell all");
+                        logBuyPhase = 1; logShopDelay = 60;
+                    } else if (logBuyPhase == 1) {
+                        client.player.networkHandler.sendCommand("shop spruce sapling 300");
+                        logBuyPhase = 2; logShopDelay = 60;
+                    } else {
+                        logBuyPhase = 0;
+                    }
+                    return;
+                }
+                logBuyPhase = 0;
+                if (replantIndex >= stumpList.size()) {
+                    stumpList.clear(); replantIndex = 0;
+                    logState = LogState.WAITING_GROWTH;
+                    return;
+                }
+                BlockPos stump = stumpList.get(replantIndex);
+                client.player.getInventory().selectedSlot = saplingSlot;
+                double sdx = stump.getX() + 0.5 - client.player.getX();
+                double sdz = stump.getZ() + 0.5 - client.player.getZ();
+                if (Math.sqrt(sdx*sdx + sdz*sdz) > 3.5) {
+                    client.player.setYaw((float) Math.toDegrees(Math.atan2(-sdx, sdz)));
+                    client.player.setPitch(-10f);
+                    pressKey(GLFW.GLFW_KEY_W, true);
+                } else {
+                    stopAllMovement();
+                    client.player.setYaw((float) Math.toDegrees(Math.atan2(-sdx, sdz)));
+                    client.player.setPitch(80f);
+                    BlockPos podzol = stump.down();
+                    client.interactionManager.interactBlock(
+                        client.player, Hand.MAIN_HAND,
+                        new BlockHitResult(Vec3d.ofCenter(podzol).add(0, 0.5, 0),
+                                           Direction.UP, podzol, false));
+                    replantIndex++;
+                }
+            }
+
+            case WAITING_GROWTH -> {
+                growthWaitTicks++;
+                if (growthWaitTicks >= 2400) {
+                    growthWaitTicks = 0;
+                    logState = LogState.SCANNING;
+                }
+            }
+        }
+    }
+
+    // ── Fish tick ─────────────────────────────────────────────────────────────
+    private void tickFish(MinecraftClient client) {
+        if (!(client.player.getMainHandStack().getItem() instanceof FishingRodItem)) {
+            client.player.sendMessage(Text.literal("§c[BotMaster] Equip a fishing rod!"), true);
+            botActive = false;
+            return;
+        }
+
+        if (fishingCastDelay > 0) { fishingCastDelay--; return; }
+
+        switch (fishingState) {
+            case CASTING -> {
+                client.options.useKey.setPressed(true);
+                client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
+                client.options.useKey.setPressed(false);
+                fishingState = FishingState.WAITING;
+                if (client.player.fishHook != null)
+                    lastBobberY = client.player.fishHook.getY();
+            }
+            case WAITING -> {
+                var hook = client.player.fishHook;
+                if (hook == null) {
+                    fishingState = FishingState.CASTING;
+                    fishingCastDelay = 3;
+                    return;
+                }
+                double bobberY = hook.getY();
+                if (bobberY < lastBobberY - 0.1) {
+                    fishingReelDelay = 1 + random.nextInt(3);
+                    fishingState = FishingState.REELING;
+                }
+                lastBobberY = bobberY;
+            }
+            case REELING -> {
+                if (fishingReelDelay > 0) { fishingReelDelay--; return; }
+                client.options.useKey.setPressed(true);
+                client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
+                client.options.useKey.setPressed(false);
+                fishCount++;
+                clickCount++;
+                fishingCastDelay = 3 + random.nextInt(3);
+                fishingState = FishingState.CASTING;
+            }
+        }
+    }
+
     // ── Lerp helpers ──────────────────────────────────────────────────────────
     private static float lerp(float a, float b, float t) {
         return a + (b - a) * t;
@@ -491,23 +771,41 @@ public class FarmBotMod implements ClientModInitializer {
             slayKills = 0; slayClickTimer = 0;
             strafeDir = 1; strafeSwitchTimer = 0;
             aimState = "scanning"; targetName = "";
+        } else if (currentMode == BotMode.FISH) {
+            fishCount = 0; fishingState = FishingState.CASTING;
+            fishingCastDelay = 0; fishingReelDelay = 0; lastBobberY = 0;
+        } else if (currentMode == BotMode.LOG) {
+            treesChopped = 0; logState = LogState.SCANNING;
+            treeQueue.clear(); stumpList.clear(); targetTreePos = null;
+            sublamateMessageCount = 0; lastSublamateTime = 0;
+            chopWaitTicks = 0; growthWaitTicks = 0;
+            walkStuckTicks = 0; replantIndex = 0;
+            logShopDelay = 0; logBuyPhase = 0;
+            logLastX = client.player.getX(); logLastZ = client.player.getZ();
         }
 
-        String emoji = currentMode == BotMode.FARM ? "🌾" : "⚔️";
+        String emoji = currentMode == BotMode.FARM ? "🌾"
+                     : currentMode == BotMode.SLAY ? "⚔️"
+                     : currentMode == BotMode.LOG  ? "🪵" : "🎣";
         client.player.sendMessage(
             Text.literal("§a[BotMaster] " + emoji + " " + currentMode.name() +
                 " started! §7H§f=stop §7J§f=menu"), true);
 
-        if (notifyBotStart && !webhookUrl.isEmpty())
+        if (notifyBotStart && !webhookUrl.isEmpty()) {
+            String detail = currentMode == BotMode.FARM
+                ? "🖱 Click: **" + clickSpeedMin + "–" + clickSpeedMax + "s**"
+                : currentMode == BotMode.SLAY
+                ? "🎯 CPS: **" + slayCpsMin + "–" + slayCpsMax + "**"
+                : currentMode == BotMode.LOG
+                ? "🌲 Scan radius: **" + logScanRadius + "**"
+                : "🎣 Fishing";
             sendWebhook(
                 emoji + " **BotMaster Started — " + currentMode.name() + "**\n" +
                 "👤 Player: **" + minecraftUsername + "**\n" +
                 "⏱ Limit: **" +
                 (sessionLimitMinutes > 0 ? sessionLimitMinutes + " min" : "Unlimited") + "**\n" +
-                (currentMode == BotMode.FARM
-                    ? "🖱 Click: **" + clickSpeedMin + "–" + clickSpeedMax + "s**"
-                    : "🎯 CPS: **" + slayCpsMin + "–" + slayCpsMax + "**")
-            );
+                detail);
+        }
     }
 
     private void stopBot(MinecraftClient client) {
@@ -531,10 +829,16 @@ public class FarmBotMod implements ClientModInitializer {
         if (sessionHistory.size() > 10) sessionHistory.remove(sessionHistory.size() - 1);
 
         if (notifySessionEnd && !webhookUrl.isEmpty()) {
-            String emoji = currentMode == BotMode.FARM ? "🌾" : "⚔️";
+            String emoji = currentMode == BotMode.FARM ? "🌾"
+                         : currentMode == BotMode.SLAY ? "⚔️"
+                         : currentMode == BotMode.LOG  ? "🪵" : "🎣";
             String extra = currentMode == BotMode.FARM
                 ? "🌾 Rows: **" + rowCount + "** | Clicks: **" + clickCount + "**\n"
-                : "⚔️ Kills: **" + slayKills + "** | Clicks: **" + clickCount + "**\n";
+                : currentMode == BotMode.SLAY
+                ? "⚔️ Kills: **" + slayKills + "** | Clicks: **" + clickCount + "**\n"
+                : currentMode == BotMode.LOG
+                ? "🪵 Trees: **" + treesChopped + "** | Clicks: **" + clickCount + "**\n"
+                : "🎣 Fish: **" + fishCount + "**\n";
             sendWebhook(
                 emoji + " **Session Complete — " + currentMode.name() + "**\n" +
                 "👤 Player: **" + minecraftUsername + "**\n" +
@@ -555,10 +859,12 @@ public class FarmBotMod implements ClientModInitializer {
 
         boolean isFarm = currentMode == BotMode.FARM;
         boolean isSlay = currentMode == BotMode.SLAY;
+        boolean isLog  = currentMode == BotMode.LOG;
+        boolean isFish = currentMode == BotMode.FISH;
         int x = 10, y = 10, w = 260;
-        int h = !botActive ? 52 : isSlay ? 220 : 190;
-        int accent = isFarm ? 0xFF00ff88 : isSlay ? 0xFFff4444 : 0xFF6666dd;
-        int border = isFarm ? 0xFF00ff44 : isSlay ? 0xFFaa2222 : 0xFF444488;
+        int h = !botActive ? 52 : isSlay ? 220 : isLog ? 210 : isFish ? 120 : 190;
+        int accent = isFarm ? 0xFF00ff88 : isSlay ? 0xFFff4444 : isLog ? 0xFFcc8833 : isFish ? 0xFF4499ff : 0xFF6666dd;
+        int border = isFarm ? 0xFF00ff44 : isSlay ? 0xFFaa2222 : isLog ? 0xFF885522 : isFish ? 0xFF2255aa : 0xFF444488;
 
         ctx.fill(x, y, x+w, y+h, 0xCC0a0a1a);
         ctx.fill(x, y, x+w, y+2, accent);
@@ -566,7 +872,8 @@ public class FarmBotMod implements ClientModInitializer {
 
         // Title bar
         String modeTag = currentMode == BotMode.NONE ? "§7No job" :
-                         isFarm ? "§a🌾 Farm" : "§c⚔️ Slay";
+                         isFarm ? "§a🌾 Farm" : isSlay ? "§c⚔️ Slay" :
+                         isLog  ? "§6🪵 Log"  : "§9🎣 Fish";
         ctx.drawText(client.textRenderer,
             Text.literal("§fBotMaster §8| " + modeTag + " §8| §eJ§f=menu §eH§f=toggle §eG§f=hud"),
             x+6, y+6, 0xFFFFFF, false);
@@ -677,6 +984,64 @@ public class FarmBotMod implements ClientModInitializer {
                     Text.literal("§7Last: §f" + last.kills + " kills §7in §f" + last.duration),
                     x+6, y+134, 0xFFFFFF, false);
             }
+
+        } else if (isLog) {
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7State: §6" + logState.name()),
+                x+6, y+41, 0xFFFFFF, false);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Trees Chopped: §f" + treesChopped +
+                    "  §7Queue: §f" + treeQueue.size()),
+                x+6, y+51, 0xFFFFFF, false);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Stumps to Replant: §f" + stumpList.size() +
+                    "  §7Idx: §f" + replantIndex),
+                x+6, y+61, 0xFFFFFF, false);
+            if (logState == LogState.WAITING_GROWTH) {
+                int remaining = 2400 - growthWaitTicks;
+                ctx.drawText(client.textRenderer,
+                    Text.literal("§7Growth timer: §e" + formatTime(remaining / 20)),
+                    x+6, y+71, 0xFFFFFF, false);
+            } else if (targetTreePos != null) {
+                ctx.drawText(client.textRenderer,
+                    Text.literal(String.format("§7Target: §f(%d, %d, %d)",
+                        targetTreePos.getX(), targetTreePos.getY(), targetTreePos.getZ())),
+                    x+6, y+71, 0xFFFFFF, false);
+            }
+            // Sapling count in hotbar
+            int sapCount = 0;
+            for (int i = 0; i < 9; i++) {
+                var stack = client.player.getInventory().getStack(i);
+                if (stack.getItem() == Items.SPRUCE_SAPLING) sapCount += stack.getCount();
+            }
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Saplings: §f" + sapCount),
+                x+6, y+81, 0xFFFFFF, false);
+            ctx.fill(x+4, y+93, x+w-4, y+94, 0xFF333355);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Clicks: §f" + clickCount +
+                    "  §7Checks: §e" + activityCheckCount +
+                    "  §7Webhook: " + (webhookUrl.isEmpty() ? "§cNot set" : "§aSet ✔")),
+                x+6, y+98, 0xFFFFFF, false);
+            if (!sessionHistory.isEmpty()) {
+                SessionRecord last = sessionHistory.get(0);
+                ctx.drawText(client.textRenderer,
+                    Text.literal("§7Last: §a+$" + formatMoney(last.profit) +
+                        " §7in §f" + last.duration),
+                    x+6, y+109, 0xFFFFFF, false);
+            }
+
+        } else if (isFish) {
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7State: §b" + fishingState.name()),
+                x+6, y+41, 0xFFFFFF, false);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Fish Caught: §f" + fishCount),
+                x+6, y+51, 0xFFFFFF, false);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Checks: §e" + activityCheckCount +
+                    "  §7Webhook: " + (webhookUrl.isEmpty() ? "§cNot set" : "§aSet ✔")),
+                x+6, y+61, 0xFFFFFF, false);
         }
     }
 
@@ -686,6 +1051,7 @@ public class FarmBotMod implements ClientModInitializer {
         private int view = 0;
         private TextFieldWidget clickMinF, clickMaxF, sessionF, webhookF, usernameF;
         private TextFieldWidget cpsMinF, cpsMaxF, minDistF, maxDistF, bpAlertF;
+        private TextFieldWidget logRadiusF, logHeightF;
 
         public MainScreen(Screen parent) {
             super(Text.literal("BotMaster"));
@@ -716,13 +1082,20 @@ public class FarmBotMod implements ClientModInitializer {
         protected void clearAndInit() { clearChildren(); init(); }
 
         private void initJobView(int px, int py, int pw, int cx, int cy) {
-            // Job cards
+            // Row 1: Farm, Slay
             addDrawableChild(ButtonWidget.builder(Text.literal("🌾  Farming"),
                 btn -> { currentMode = BotMode.FARM; clearAndInit(); })
-                .dimensions(px+10, py+100, 150, 30).build());
+                .dimensions(px+10, py+80, 150, 26).build());
             addDrawableChild(ButtonWidget.builder(Text.literal("⚔️  Slaying"),
                 btn -> { currentMode = BotMode.SLAY; clearAndInit(); })
-                .dimensions(px+pw-160, py+100, 150, 30).build());
+                .dimensions(px+pw-160, py+80, 150, 26).build());
+            // Row 2: Log, Fish
+            addDrawableChild(ButtonWidget.builder(Text.literal("🪵  Logging"),
+                btn -> { currentMode = BotMode.LOG; clearAndInit(); })
+                .dimensions(px+10, py+112, 150, 26).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("🎣  Fishing"),
+                btn -> { currentMode = BotMode.FISH; clearAndInit(); })
+                .dimensions(px+pw-160, py+112, 150, 26).build());
 
             // Start/Stop
             boolean canStart = currentMode != BotMode.NONE;
@@ -738,7 +1111,7 @@ public class FarmBotMod implements ClientModInitializer {
                     if (botActive) mod.startBot(c);
                     else mod.stopBot(c);
                     clearAndInit();
-                }).dimensions(cx-80, py+148, 160, 24).build());
+                }).dimensions(cx-80, py+156, 160, 24).build());
         }
 
         private void initConfigView(int px, int py, int pw, int cx, int cy) {
@@ -762,6 +1135,11 @@ public class FarmBotMod implements ClientModInitializer {
             // Backpack + session
             bpAlertF = addField(px+10, fy+12, 150, String.valueOf(backpackAlertPercent));
             sessionF  = addField(px+pw-160, fy+12, 150, String.valueOf(sessionLimitMinutes));
+            fy += 42;
+
+            // Log config
+            logRadiusF = addField(px+10, fy+12, 150, String.valueOf(logScanRadius));
+            logHeightF = addField(px+pw-160, fy+12, 150, String.valueOf(logMinHeight));
             fy += 42;
 
             // Username
@@ -809,6 +1187,8 @@ public class FarmBotMod implements ClientModInitializer {
             try { maxDistance = Math.max(minDistance+1, Float.parseFloat(maxDistF.getText())); } catch (Exception ignored) {}
             try { backpackAlertPercent = Math.min(100, Math.max(1, Integer.parseInt(bpAlertF.getText()))); } catch (Exception ignored) {}
             try { sessionLimitMinutes = Math.max(0, Integer.parseInt(sessionF.getText())); } catch (Exception ignored) {}
+            try { logScanRadius = Math.max(10, Integer.parseInt(logRadiusF.getText())); } catch (Exception ignored) {}
+            try { logMinHeight = Math.max(4, Integer.parseInt(logHeightF.getText())); } catch (Exception ignored) {}
             if (usernameF != null) minecraftUsername = usernameF.getText().trim();
             if (webhookF != null) webhookUrl = webhookF.getText().trim();
         }
@@ -843,32 +1223,43 @@ public class FarmBotMod implements ClientModInitializer {
 
         private void renderJobView(DrawContext ctx, int px, int py, int pw, int cx) {
             ctx.drawCenteredTextWithShadow(textRenderer,
-                Text.literal("§7Select a job"), cx, py+70, 0x888888);
+                Text.literal("§7Select a job"), cx, py+68, 0x888888);
 
-            // Card highlights
+            // Row 1 card highlights
             if (currentMode==BotMode.FARM)
-                ctx.fill(px+8, py+98, px+162, py+132, 0xFF0a1a0a);
+                ctx.fill(px+8, py+78, px+162, py+108, 0xFF0a1a0a);
             if (currentMode==BotMode.SLAY)
-                ctx.fill(px+pw-162, py+98, px+pw-8, py+132, 0xFF1a0a0a);
+                ctx.fill(px+pw-162, py+78, px+pw-8, py+108, 0xFF1a0a0a);
+            // Row 2 card highlights
+            if (currentMode==BotMode.LOG)
+                ctx.fill(px+8, py+110, px+162, py+140, 0xFF100d00);
+            if (currentMode==BotMode.FISH)
+                ctx.fill(px+pw-162, py+110, px+pw-8, py+140, 0xFF00080f);
 
             ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§8harvest crops"), px+20, py+133, 0xFFFFFF);
+                Text.literal("§8harvest crops"), px+20, py+109, 0xFFFFFF);
             ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§8kill mobs"), px+pw-145, py+133, 0xFFFFFF);
+                Text.literal("§8kill mobs"), px+pw-145, py+109, 0xFFFFFF);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§8chop trees"), px+20, py+141, 0xFFFFFF);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§8catch fish"), px+pw-140, py+141, 0xFFFFFF);
 
-            ctx.fill(px+4, py+180, px+pw-4, py+181, 0xFF333355);
+            ctx.fill(px+4, py+188, px+pw-4, py+189, 0xFF333355);
 
             String jobStr = currentMode==BotMode.NONE ? "§8None selected" :
-                            currentMode==BotMode.FARM ? "§a🌾 Farming" : "§c⚔️ Slaying";
+                            currentMode==BotMode.FARM ? "§a🌾 Farming" :
+                            currentMode==BotMode.SLAY ? "§c⚔️ Slaying" :
+                            currentMode==BotMode.LOG  ? "§6🪵 Logging" : "§9🎣 Fishing";
             ctx.drawCenteredTextWithShadow(textRenderer,
-                Text.literal("§7Job: " + jobStr), cx, py+185, 0xFFFFFF);
+                Text.literal("§7Job: " + jobStr), cx, py+193, 0xFFFFFF);
             ctx.drawCenteredTextWithShadow(textRenderer,
                 Text.literal("§7Status: " + (botActive ? "§a● Running" : "§c● Stopped")),
-                cx, py+197, 0xFFFFFF);
+                cx, py+205, 0xFFFFFF);
             if (botActive) {
                 long el = (System.currentTimeMillis() - startTime) / 1000;
                 ctx.drawCenteredTextWithShadow(textRenderer,
-                    Text.literal("§7Session: §f" + formatTime(el)), cx, py+209, 0xFFFFFF);
+                    Text.literal("§7Session: §f" + formatTime(el)), cx, py+217, 0xFFFFFF);
             }
         }
 
@@ -895,6 +1286,11 @@ public class FarmBotMod implements ClientModInitializer {
                 Text.literal("§7Session Limit (min, 0=∞):"), px+pw-160, fy, 0xAAAAAA);
             fy += 42;
             ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7Log Scan Radius (blocks):"), px+10, fy, 0xAAAAAA);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7Min Tree Height:"), px+pw-160, fy, 0xAAAAAA);
+            fy += 42;
+            ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§7Minecraft Username:"), px+10, fy, 0xAAAAAA);
             fy += 42;
             ctx.drawTextWithShadow(textRenderer,
@@ -917,9 +1313,13 @@ public class FarmBotMod implements ClientModInitializer {
                 Text.literal("§7$" + formatMoney(perMin) + "/min"), px+18, y+30, 0x44aa44);
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§7⚔ Kills: §f" + slayKills +
-                    "  §7Before: §f$" + formatMoney(balanceBefore) +
-                    "  §7After: §f$" + formatMoney(balanceAfter)),
+                    "  §7🎣 Fish: §f" + fishCount +
+                    "  §7🪵 Trees: §f" + treesChopped),
                 px+18, y+42, 0xFFFFFF);
+            ctx.drawTextWithShadow(textRenderer,
+                Text.literal("§7Before: §f$" + formatMoney(balanceBefore) +
+                    "  §7After: §f$" + formatMoney(balanceAfter)),
+                px+18, y+52, 0xFFFFFF);
             y += 60;
 
             // History
