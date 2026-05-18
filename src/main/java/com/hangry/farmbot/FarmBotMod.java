@@ -106,6 +106,7 @@ public class FarmBotMod implements ClientModInitializer {
     private static FishingState fishingState = FishingState.CASTING;
     private static int fishingCastDelay = 0;
     private static int fishingReelDelay = 0;
+    private static int fishingWaitTicks = 0;
     private static double lastBobberY = 0;
     private static int fishCount = 0;
 
@@ -686,18 +687,23 @@ public class FarmBotMod implements ClientModInitializer {
                 client.options.useKey.setPressed(true);
                 client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
                 client.options.useKey.setPressed(false);
+                fishingWaitTicks = 0;
+                lastBobberY = Double.MAX_VALUE;
                 fishingState = FishingState.WAITING;
-                if (client.player.fishHook != null)
-                    lastBobberY = client.player.fishHook.getY();
             }
             case WAITING -> {
+                fishingWaitTicks++;
                 var hook = client.player.fishHook;
                 if (hook == null) {
-                    fishingState = FishingState.CASTING;
-                    fishingCastDelay = 3;
+                    // Give the bobber entity up to 10 ticks to appear before recasting
+                    if (fishingWaitTicks > 10) {
+                        fishingState = FishingState.CASTING;
+                        fishingCastDelay = 5;
+                    }
                     return;
                 }
                 double bobberY = hook.getY();
+                if (lastBobberY == Double.MAX_VALUE) lastBobberY = bobberY; // first valid read
                 if (bobberY < lastBobberY - 0.1) {
                     fishingReelDelay = 1 + random.nextInt(3);
                     fishingState = FishingState.REELING;
@@ -711,6 +717,7 @@ public class FarmBotMod implements ClientModInitializer {
                 client.options.useKey.setPressed(false);
                 fishCount++;
                 clickCount++;
+                fishingWaitTicks = 0;
                 fishingCastDelay = 3 + random.nextInt(3);
                 fishingState = FishingState.CASTING;
             }
@@ -773,7 +780,8 @@ public class FarmBotMod implements ClientModInitializer {
             aimState = "scanning"; targetName = "";
         } else if (currentMode == BotMode.FISH) {
             fishCount = 0; fishingState = FishingState.CASTING;
-            fishingCastDelay = 0; fishingReelDelay = 0; lastBobberY = 0;
+            fishingCastDelay = 0; fishingReelDelay = 0;
+            fishingWaitTicks = 0; lastBobberY = Double.MAX_VALUE;
         } else if (currentMode == BotMode.LOG) {
             treesChopped = 0; logState = LogState.SCANNING;
             treeQueue.clear(); stumpList.clear(); targetTreePos = null;
