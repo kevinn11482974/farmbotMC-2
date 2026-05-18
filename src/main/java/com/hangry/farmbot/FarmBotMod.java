@@ -541,13 +541,25 @@ public class FarmBotMod implements ClientModInitializer {
                 }
                 float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
                 client.player.setYaw(yaw);
-                client.player.setPitch(-10f);
+                client.player.setPitch(15f); // look slightly down to see leaves ahead
                 pressKey(GLFW.GLFW_KEY_W, true);
                 double moved = Math.abs(client.player.getX()-logLastX) + Math.abs(client.player.getZ()-logLastZ);
                 logLastX = client.player.getX(); logLastZ = client.player.getZ();
                 if (moved < 0.05) {
                     walkStuckTicks++;
-                    if (walkStuckTicks >= 3) pressKey(GLFW.GLFW_KEY_SPACE, true);
+                    if (walkStuckTicks >= 3) {
+                        pressKey(GLFW.GLFW_KEY_SPACE, true);
+                        // Break leaves that are blocking the path — never dirt or glowstone
+                        if (client.crosshairTarget != null &&
+                                client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
+                            BlockHitResult bhr = (BlockHitResult) client.crosshairTarget;
+                            var bs = client.world.getBlockState(bhr.getBlockPos());
+                            if (bs.isIn(BlockTags.LEAVES)) {
+                                client.interactionManager.attackBlock(bhr.getBlockPos(), bhr.getSide());
+                                client.player.swingHand(Hand.MAIN_HAND);
+                            }
+                        }
+                    }
                     if (walkStuckTicks >= 8)
                         pressKey(walkStuckTicks % 4 < 2 ? GLFW.GLFW_KEY_A : GLFW.GLFW_KEY_D, true);
                 } else {
@@ -563,21 +575,12 @@ public class FarmBotMod implements ClientModInitializer {
             case CHOPPING -> {
                 if (targetTreePos == null) { logState = LogState.SCANNING; return; }
                 stopAllMovement();
-                double dx = targetTreePos.getX() + 0.5 - client.player.getX();
-                double dy = (targetTreePos.getY() + logMinHeight / 2.0)
-                           - (client.player.getY() + client.player.getStandingEyeHeight());
-                double dz = targetTreePos.getZ() + 0.5 - client.player.getZ();
-                double hd = Math.sqrt(dx*dx + dz*dz);
-                client.player.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
-                client.player.setPitch((float)(-Math.toDegrees(Math.atan2(dy, hd))));
-                if (client.crosshairTarget != null &&
-                        client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
+                aimAtTree(client);
+                if (isTargetTreeLog(client)) {
                     BlockHitResult bhr = (BlockHitResult) client.crosshairTarget;
-                    if (client.world.getBlockState(bhr.getBlockPos()).isIn(BlockTags.LOGS)) {
-                        client.interactionManager.attackBlock(bhr.getBlockPos(), bhr.getSide());
-                        client.player.swingHand(Hand.MAIN_HAND);
-                        clickCount++;
-                    }
+                    client.interactionManager.attackBlock(bhr.getBlockPos(), bhr.getSide());
+                    client.player.swingHand(Hand.MAIN_HAND);
+                    clickCount++;
                 }
                 logState = LogState.WAITING_CHOP;
             }
@@ -585,14 +588,12 @@ public class FarmBotMod implements ClientModInitializer {
             case WAITING_CHOP -> {
                 if (targetTreePos == null) { logState = LogState.SCANNING; return; }
                 stopAllMovement();
-                if (client.crosshairTarget != null &&
-                        client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
+                aimAtTree(client); // keep locked on the target block every tick
+                if (isTargetTreeLog(client)) {
                     BlockHitResult bhr = (BlockHitResult) client.crosshairTarget;
-                    if (client.world.getBlockState(bhr.getBlockPos()).isIn(BlockTags.LOGS)) {
-                        client.interactionManager.attackBlock(bhr.getBlockPos(), bhr.getSide());
-                        client.player.swingHand(Hand.MAIN_HAND);
-                        clickCount++;
-                    }
+                    client.interactionManager.attackBlock(bhr.getBlockPos(), bhr.getSide());
+                    client.player.swingHand(Hand.MAIN_HAND);
+                    clickCount++;
                 }
                 chopWaitTicks++;
                 boolean chopDone = sublamateMessageCount > 0
@@ -670,6 +671,37 @@ public class FarmBotMod implements ClientModInitializer {
                 }
             }
         }
+    }
+
+    // Aim at the log 1 block below the player's eye on the target tree column
+    private static void aimAtTree(MinecraftClient client) {
+        if (targetTreePos == null) return;
+        double eyeY = client.player.getY() + client.player.getStandingEyeHeight();
+        // Block that is 1 unit below eye level, clamped to the tree's log range
+        double chopBlockY = Math.floor(eyeY - 1.0);
+        chopBlockY = Math.max(targetTreePos.getY(),
+                     Math.min(targetTreePos.getY() + logMinHeight - 1, chopBlockY));
+        double dx = targetTreePos.getX() + 0.5 - client.player.getX();
+        double dy = (chopBlockY + 0.5) - eyeY;
+        double dz = targetTreePos.getZ() + 0.5 - client.player.getZ();
+        double hd = Math.sqrt(dx * dx + dz * dz);
+        client.player.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
+        client.player.setPitch((float)(-Math.toDegrees(Math.atan2(dy, hd))));
+    }
+
+    // True only when the crosshair is on a log belonging to the target tree column
+    private static boolean isTargetTreeLog(MinecraftClient client) {
+        if (targetTreePos == null || client.crosshairTarget == null) return false;
+        if (client.crosshairTarget.getType() != HitResult.Type.BLOCK) return false;
+        BlockPos hit = ((BlockHitResult) client.crosshairTarget).getBlockPos();
+        if (!client.world.getBlockState(hit).isIn(BlockTags.LOGS)) return false;
+        // Must be within 1 block X/Z of the target column — prevents hitting adjacent trees
+        if (Math.abs(hit.getX() - targetTreePos.getX()) > 1) return false;
+        if (Math.abs(hit.getZ() - targetTreePos.getZ()) > 1) return false;
+        // Must be within the tree's expected height range
+        if (hit.getY() < targetTreePos.getY()) return false;
+        if (hit.getY() > targetTreePos.getY() + logMinHeight + 2) return false;
+        return true;
     }
 
     // ── Fish tick ─────────────────────────────────────────────────────────────
