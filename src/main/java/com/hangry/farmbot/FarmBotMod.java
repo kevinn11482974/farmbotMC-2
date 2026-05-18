@@ -713,7 +713,7 @@ public class FarmBotMod implements ClientModInitializer {
                 .dimensions(cx-40, py+ph-26, 80, 18).build());
         }
 
-        private void clearAndInit() { clearChildren(); init(); }
+        protected void clearAndInit() { clearChildren(); init(); }
 
         private void initJobView(int px, int py, int pw, int cx, int cy) {
             // Job cards
