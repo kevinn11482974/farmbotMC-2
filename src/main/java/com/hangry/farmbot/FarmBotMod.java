@@ -426,9 +426,8 @@ public class FarmBotMod implements ClientModInitializer {
             slayClickEvery = Math.max(1, (int)(20f / cps));
 
             // Right click = use item = fire crossbow
-            KeyBinding.onKeyPressed(InputUtil.fromKeyCode(GLFW.GLFW_KEY_F, 0));
             client.options.useKey.setPressed(true);
-            client.doItemUse();
+            client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
             client.options.useKey.setPressed(false);
             client.player.swingHand(Hand.MAIN_HAND);
             clickCount++;
