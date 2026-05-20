@@ -16,15 +16,11 @@ import net.minecraft.client.util.InputUtil;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.item.FishingRodItem;
-import net.minecraft.item.Items;
-import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
-import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
-import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import org.lwjgl.glfw.GLFW;
 
@@ -44,7 +40,7 @@ import java.util.regex.Pattern;
 public class FarmBotMod implements ClientModInitializer {
 
     // ── Mode ──────────────────────────────────────────────────────────────────
-    public enum BotMode { NONE, FARM, SLAY, LOG, FISH }
+    public enum BotMode { NONE, FARM, SLAY, FISH }
     public static BotMode currentMode = BotMode.NONE;
     public static boolean botActive = false;
     public static boolean showGui = true;
@@ -58,10 +54,6 @@ public class FarmBotMod implements ClientModInitializer {
     public static boolean notifyActivityCheck = true;
     public static boolean notifySessionEnd = true;
     public static boolean notifyBotStart = false;
-
-    // ── Log settings ──────────────────────────────────────────────────────────
-    public static int logScanRadius = 200;
-    public static int logMinHeight = 8;
 
     // ── Slay settings ─────────────────────────────────────────────────────────
     public static float slayCpsMin = 3f;
@@ -107,25 +99,17 @@ public class FarmBotMod implements ClientModInitializer {
     private static int fishingCastDelay = 0;
     private static int fishingReelDelay = 0;
     private static int fishingWaitTicks = 0;
-    private static double lastBobberY = 0;
+    private static int fishingWaterTicks = 0;
+    private static double lastBobberY = Double.MAX_VALUE;
     private static int fishCount = 0;
 
-    // ── Log state ─────────────────────────────────────────────────────────────
-    public enum LogState { SCANNING, WALKING, CHOPPING, WAITING_CHOP, REPLANTING, WAITING_GROWTH }
-    private static LogState logState = LogState.SCANNING;
-    private static BlockPos targetTreePos = null;
-    private static final List<BlockPos> treeQueue = new ArrayList<>();
-    private static final List<BlockPos> stumpList = new ArrayList<>();
-    private static int sublamateMessageCount = 0;
-    private static long lastSublamateTime = 0;
-    private static int chopWaitTicks = 0;
-    private static int growthWaitTicks = 0;
-    private static int walkStuckTicks = 0;
-    private static int replantIndex = 0;
-    private static int treesChopped = 0;
-    private static int logShopDelay = 0;
-    private static int logBuyPhase = 0;
-    private static double logLastX = 0, logLastZ = 0;
+    // ── Activity solver state ─────────────────────────────────────────────────
+    private static boolean activitySolverActive = false;
+    private static String activityCurrentCmd = "";
+    private static int activityCmdTicks = 0;
+    private static float activityStartYaw = 0;
+    private static float activityStartPitch = 0;
+    private static int activityWaitTicks = 0;
 
     // ── Balance tracking ──────────────────────────────────────────────────────
     private static long balanceBefore = 0;
@@ -192,10 +176,19 @@ public class FarmBotMod implements ClientModInitializer {
                     }
                 } catch (Exception ignored) {}
             }
-            // Sublimate III log chop detection
-            if (raw.contains("Sublimate III has turned the log")) {
-                sublamateMessageCount++;
-                lastSublamateTime = System.currentTimeMillis();
+            // Activity check auto-solver — detect server instructions
+            if (activitySolverActive && activityCurrentCmd.isEmpty() && activityWaitTicks == 0) {
+                MinecraftClient mc = MinecraftClient.getInstance();
+                if (mc.player != null) {
+                    if      (raw.contains("Look Left"))                    startActivityCmd(mc.player, "Look Left");
+                    else if (raw.contains("Look Right"))                   startActivityCmd(mc.player, "Look Right");
+                    else if (raw.contains("Look Up"))                      startActivityCmd(mc.player, "Look Up");
+                    else if (raw.contains("Look Down"))                    startActivityCmd(mc.player, "Look Down");
+                    else if (raw.contains("Jump"))                         startActivityCmd(mc.player, "Jump");
+                    else if (raw.contains("Sneak") || raw.contains("Crouch")) startActivityCmd(mc.player, "Sneak");
+                    else if (raw.contains("Punch") || raw.contains("Hit"))    startActivityCmd(mc.player, "Punch");
+                    else if (raw.contains("Click"))                        startActivityCmd(mc.player, "Click");
+                }
             }
             // Backpack (action bar)
             if (overlay && raw.contains("Backpack")) {
@@ -282,6 +275,9 @@ public class FarmBotMod implements ClientModInitializer {
                 pressKey(GLFW.GLFW_KEY_SPACE, false);
                 jumpHoldTicks = 0;
                 botActive = false;
+                activitySolverActive = true;
+                activityCurrentCmd = "";
+                activityWaitTicks = 0;
                 if (notifyActivityCheck) sendWebhook(
                     "@everyone\n" +
                     "⚠️ **ACTIVITY CHECK DETECTED!**\n" +
@@ -296,13 +292,20 @@ public class FarmBotMod implements ClientModInitializer {
                     Text.literal("§c[BotMaster] §eActivity check! Bot paused. Check Discord!"), false);
             }
         }
+        // Deactivate solver when the activity-check screen closes
+        if (!isHandledOpen && wasHandledScreenOpen && activitySolverActive) {
+            activitySolverActive = false;
+            activityCurrentCmd = "";
+            pressKey(GLFW.GLFW_KEY_LEFT_SHIFT, false);
+            pressKey(GLFW.GLFW_KEY_SPACE, false);
+        }
         wasHandledScreenOpen = isHandledOpen;
+        tickActivitySolver(client);
         if (!botActive) return;
 
         // Route to mode
         if      (currentMode == BotMode.FARM) tickFarm(client);
         else if (currentMode == BotMode.SLAY) tickSlay(client);
-        else if (currentMode == BotMode.LOG)  tickLog(client);
         else if (currentMode == BotMode.FISH) tickFish(client);
     }
 
@@ -479,262 +482,6 @@ public class FarmBotMod implements ClientModInitializer {
         }
     }
 
-    // ── Log tick ──────────────────────────────────────────────────────────────
-    private void tickLog(MinecraftClient client) {
-        if (client.world == null) return;
-        if (logShopDelay > 0) { logShopDelay--; return; }
-
-        switch (logState) {
-            case SCANNING -> {
-                treeQueue.clear();
-                BlockPos pp = client.player.getBlockPos();
-                int r = logScanRadius;
-                for (int dx = -r; dx <= r; dx++) {
-                    for (int dz = -r; dz <= r; dz++) {
-                        for (int dy = -5; dy <= 25; dy++) {
-                            BlockPos base = pp.add(dx, dy, dz);
-                            if (client.world.getBlockState(base).isIn(BlockTags.LOGS)) {
-                                int h = 0;
-                                for (int i = 0; i < 40; i++) {
-                                    if (client.world.getBlockState(base.up(i)).isIn(BlockTags.LOGS)) h++;
-                                    else break;
-                                }
-                                if (h >= logMinHeight) treeQueue.add(base);
-                                break;
-                            }
-                        }
-                    }
-                }
-                treeQueue.sort(Comparator.comparingDouble(p -> pp.getSquaredDistance(p)));
-                List<BlockPos> deduped = new ArrayList<>();
-                for (BlockPos t : treeQueue) {
-                    boolean dup = deduped.stream().anyMatch(
-                        d -> Math.abs(d.getX()-t.getX()) < 4 && Math.abs(d.getZ()-t.getZ()) < 4);
-                    if (!dup) deduped.add(t);
-                }
-                treeQueue.clear(); treeQueue.addAll(deduped);
-                if (treeQueue.isEmpty()) {
-                    logState = stumpList.isEmpty() ? LogState.WAITING_GROWTH : LogState.REPLANTING;
-                    replantIndex = 0;
-                } else {
-                    targetTreePos = treeQueue.remove(0);
-                    logLastX = client.player.getX(); logLastZ = client.player.getZ();
-                    walkStuckTicks = 0;
-                    logState = LogState.WALKING;
-                }
-            }
-
-            case WALKING -> {
-                if (targetTreePos == null) { logState = LogState.SCANNING; return; }
-                double dx = targetTreePos.getX() + 0.5 - client.player.getX();
-                double dz = targetTreePos.getZ() + 0.5 - client.player.getZ();
-                double dist = Math.sqrt(dx*dx + dz*dz);
-                if (dist <= 4.0) {
-                    stopAllMovement();
-                    pressKey(GLFW.GLFW_KEY_SPACE, false);
-                    walkStuckTicks = 0;
-                    sublamateMessageCount = 0;
-                    lastSublamateTime = System.currentTimeMillis();
-                    chopWaitTicks = 0;
-                    logState = LogState.CHOPPING;
-                    return;
-                }
-                float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-                client.player.setYaw(yaw);
-                client.player.setPitch(15f); // look slightly down to see leaves ahead
-                pressKey(GLFW.GLFW_KEY_W, true);
-                double moved = Math.abs(client.player.getX()-logLastX) + Math.abs(client.player.getZ()-logLastZ);
-                logLastX = client.player.getX(); logLastZ = client.player.getZ();
-                if (moved < 0.05) {
-                    walkStuckTicks++;
-                    if (walkStuckTicks >= 3) {
-                        pressKey(GLFW.GLFW_KEY_SPACE, true);
-                        // Break leaves that are blocking the path — never dirt or glowstone
-                        if (client.crosshairTarget != null &&
-                                client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
-                            BlockHitResult bhr = (BlockHitResult) client.crosshairTarget;
-                            var bs = client.world.getBlockState(bhr.getBlockPos());
-                            if (bs.isIn(BlockTags.LEAVES)) {
-                                client.interactionManager.attackBlock(bhr.getBlockPos(), bhr.getSide());
-                                client.player.swingHand(Hand.MAIN_HAND);
-                            }
-                        }
-                    }
-                    if (walkStuckTicks >= 8)
-                        pressKey(walkStuckTicks % 4 < 2 ? GLFW.GLFW_KEY_A : GLFW.GLFW_KEY_D, true);
-                } else {
-                    if (walkStuckTicks > 0) {
-                        walkStuckTicks = 0;
-                        pressKey(GLFW.GLFW_KEY_SPACE, false);
-                        pressKey(GLFW.GLFW_KEY_A, false);
-                        pressKey(GLFW.GLFW_KEY_D, false);
-                    }
-                }
-            }
-
-            case CHOPPING -> {
-                if (targetTreePos == null) { logState = LogState.SCANNING; return; }
-                stopAllMovement();
-                BlockPos firstLog = findLowestLog(client);
-                if (firstLog == null) { advanceToNextTree(client); return; }
-                aimAtBlock(client, firstLog);
-                if (withinReach(client, firstLog)) hitBlock(client, firstLog);
-                sublamateMessageCount = 0;
-                lastSublamateTime = System.currentTimeMillis();
-                chopWaitTicks = 0;
-                logState = LogState.WAITING_CHOP;
-            }
-
-            case WAITING_CHOP -> {
-                if (targetTreePos == null) { logState = LogState.SCANNING; return; }
-                stopAllMovement();
-
-                BlockPos lowest = findLowestLog(client);
-
-                if (lowest == null) {
-                    // Column is clear — Tree Feller finished the job
-                    treesChopped++;
-                    stumpList.add(targetTreePos);
-                    advanceToNextTree(client);
-                    return;
-                }
-
-                if (!withinReach(client, lowest)) {
-                    // Remaining logs are too high to reach — Tree Feller got them (90%)
-                    treesChopped++;
-                    stumpList.add(targetTreePos);
-                    advanceToNextTree(client);
-                    return;
-                }
-
-                // Keep breaking bottom-to-top until clear
-                aimAtBlock(client, lowest);
-                hitBlock(client, lowest);
-                chopWaitTicks++;
-
-                if (chopWaitTicks > 400) { // 20-second safety bail-out
-                    advanceToNextTree(client);
-                }
-            }
-
-            case REPLANTING -> {
-                int saplingSlot = -1;
-                for (int i = 0; i < 9; i++) {
-                    if (client.player.getInventory().getStack(i).getItem() == Items.SPRUCE_SAPLING) {
-                        saplingSlot = i; break;
-                    }
-                }
-                if (saplingSlot == -1) {
-                    if (logBuyPhase == 0) {
-                        client.player.networkHandler.sendCommand("sell all");
-                        logBuyPhase = 1; logShopDelay = 60;
-                    } else if (logBuyPhase == 1) {
-                        client.player.networkHandler.sendCommand("shop spruce sapling 300");
-                        logBuyPhase = 2; logShopDelay = 60;
-                    } else {
-                        logBuyPhase = 0;
-                    }
-                    return;
-                }
-                logBuyPhase = 0;
-                if (replantIndex >= stumpList.size()) {
-                    stumpList.clear(); replantIndex = 0;
-                    logState = LogState.WAITING_GROWTH;
-                    return;
-                }
-                BlockPos stump = stumpList.get(replantIndex);
-                client.player.getInventory().selectedSlot = saplingSlot;
-                double sdx = stump.getX() + 0.5 - client.player.getX();
-                double sdz = stump.getZ() + 0.5 - client.player.getZ();
-                if (Math.sqrt(sdx*sdx + sdz*sdz) > 3.5) {
-                    client.player.setYaw((float) Math.toDegrees(Math.atan2(-sdx, sdz)));
-                    client.player.setPitch(-10f);
-                    pressKey(GLFW.GLFW_KEY_W, true);
-                } else {
-                    stopAllMovement();
-                    client.player.setYaw((float) Math.toDegrees(Math.atan2(-sdx, sdz)));
-                    client.player.setPitch(80f);
-                    BlockPos podzol = stump.down();
-                    client.interactionManager.interactBlock(
-                        client.player, Hand.MAIN_HAND,
-                        new BlockHitResult(Vec3d.ofCenter(podzol).add(0, 0.5, 0),
-                                           Direction.UP, podzol, false));
-                    replantIndex++;
-                }
-            }
-
-            case WAITING_GROWTH -> {
-                growthWaitTicks++;
-                if (growthWaitTicks >= 2400) {
-                    growthWaitTicks = 0;
-                    logState = LogState.SCANNING;
-                }
-            }
-        }
-    }
-
-    // Scan the target tree column bottom-to-top; return lowest surviving log, or null if clear
-    private static BlockPos findLowestLog(MinecraftClient client) {
-        if (targetTreePos == null || client.world == null) return null;
-        for (int i = 0; i <= logMinHeight + 5; i++) {
-            BlockPos check = targetTreePos.up(i);
-            if (client.world.getBlockState(check).isIn(BlockTags.LOGS)) return check;
-        }
-        return null;
-    }
-
-    // Point the player's view at the centre of a specific block
-    private static void aimAtBlock(MinecraftClient client, BlockPos target) {
-        double eyeY = client.player.getY() + client.player.getStandingEyeHeight();
-        double dx = target.getX() + 0.5 - client.player.getX();
-        double dy = (target.getY() + 0.5) - eyeY;
-        double dz = target.getZ() + 0.5 - client.player.getZ();
-        double hd = Math.sqrt(dx * dx + dz * dz);
-        client.player.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
-        client.player.setPitch((float)(-Math.toDegrees(Math.atan2(dy, hd))));
-    }
-
-    // True if the block centre is within arm's reach from the player's eyes
-    private static boolean withinReach(MinecraftClient client, BlockPos block) {
-        double eyeX = client.player.getX();
-        double eyeY = client.player.getY() + client.player.getStandingEyeHeight();
-        double eyeZ = client.player.getZ();
-        double d = Math.sqrt(Math.pow(block.getX() + 0.5 - eyeX, 2)
-                           + Math.pow(block.getY() + 0.5 - eyeY, 2)
-                           + Math.pow(block.getZ() + 0.5 - eyeZ, 2));
-        return d <= 4.5;
-    }
-
-    // Strike a specific block; prefer the exact face from crosshairTarget when it matches
-    private static void hitBlock(MinecraftClient client, BlockPos block) {
-        Direction side = Direction.NORTH;
-        if (client.crosshairTarget != null &&
-                client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
-            BlockHitResult bhr = (BlockHitResult) client.crosshairTarget;
-            if (bhr.getBlockPos().equals(block)) side = bhr.getSide();
-        }
-        client.interactionManager.attackBlock(block, side);
-        client.player.swingHand(Hand.MAIN_HAND);
-        clickCount++;
-    }
-
-    // Finish current tree and move to the next one (or REPLANTING/SCANNING)
-    private void advanceToNextTree(MinecraftClient client) {
-        targetTreePos = null;
-        sublamateMessageCount = 0;
-        chopWaitTicks = 0;
-        if (!treeQueue.isEmpty()) {
-            targetTreePos = treeQueue.remove(0);
-            logLastX = client.player.getX(); logLastZ = client.player.getZ();
-            walkStuckTicks = 0;
-            lastSublamateTime = System.currentTimeMillis();
-            logState = LogState.WALKING;
-        } else {
-            logState = stumpList.isEmpty() ? LogState.SCANNING : LogState.REPLANTING;
-            replantIndex = 0;
-        }
-    }
-
     // ── Fish tick ─────────────────────────────────────────────────────────────
     private void tickFish(MinecraftClient client) {
         if (!(client.player.getMainHandStack().getItem() instanceof FishingRodItem)) {
@@ -751,6 +498,7 @@ public class FarmBotMod implements ClientModInitializer {
                 client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
                 client.options.useKey.setPressed(false);
                 fishingWaitTicks = 0;
+                fishingWaterTicks = 0;
                 lastBobberY = Double.MAX_VALUE;
                 fishingState = FishingState.WAITING;
             }
@@ -758,16 +506,21 @@ public class FarmBotMod implements ClientModInitializer {
                 fishingWaitTicks++;
                 var hook = client.player.fishHook;
                 if (hook == null) {
-                    // Give the bobber entity up to 20 ticks (1 s) to appear before recasting
+                    // Give the bobber up to 20 ticks to appear before recasting
                     if (fishingWaitTicks > 20) {
+                        fishingCastDelay = 5 + random.nextInt(6);
                         fishingState = FishingState.CASTING;
-                        fishingCastDelay = 10;
                     }
                     return;
                 }
+                fishingWaterTicks++;
                 double bobberY = hook.getY();
-                if (lastBobberY == Double.MAX_VALUE) lastBobberY = bobberY; // first valid read
-                if (bobberY < lastBobberY - 0.1) {
+                if (lastBobberY == Double.MAX_VALUE) {
+                    lastBobberY = bobberY;
+                    return;
+                }
+                // Only detect a bite after 60 ticks of water soak
+                if (fishingWaterTicks >= 60 && bobberY < lastBobberY - 0.08) {
                     fishingReelDelay = 1 + random.nextInt(3);
                     fishingState = FishingState.REELING;
                 }
@@ -775,10 +528,10 @@ public class FarmBotMod implements ClientModInitializer {
             }
             case REELING -> {
                 if (fishingReelDelay > 0) { fishingReelDelay--; return; }
-                // If hook is already gone (server removed it before we reeled), just recast
+                // If hook already gone, just recast
                 if (client.player.fishHook == null) {
-                    fishingWaitTicks = 0;
-                    fishingCastDelay = 5;
+                    fishingWaterTicks = 0;
+                    fishingCastDelay = 5 + random.nextInt(6);
                     fishingState = FishingState.CASTING;
                     return;
                 }
@@ -787,11 +540,78 @@ public class FarmBotMod implements ClientModInitializer {
                 client.options.useKey.setPressed(false);
                 fishCount++;
                 clickCount++;
-                fishingWaitTicks = 0;
-                fishingCastDelay = 3 + random.nextInt(3);
+                fishingWaterTicks = 0;
+                fishingCastDelay = 5 + random.nextInt(6);
                 fishingState = FishingState.CASTING;
             }
         }
+    }
+
+    // ── Activity solver ───────────────────────────────────────────────────────
+    private void tickActivitySolver(MinecraftClient client) {
+        if (!activitySolverActive || client.player == null) return;
+        if (activityWaitTicks > 0) { activityWaitTicks--; return; }
+        if (activityCurrentCmd.isEmpty()) return;
+
+        activityCmdTicks++;
+        switch (activityCurrentCmd) {
+            case "Look Left" -> {
+                float t = Math.min(1f, activityCmdTicks / 10f);
+                client.player.setYaw(lerpAngle(activityStartYaw, activityStartYaw - 90f, t));
+                if (activityCmdTicks >= 10) finishActivityCmd();
+            }
+            case "Look Right" -> {
+                float t = Math.min(1f, activityCmdTicks / 10f);
+                client.player.setYaw(lerpAngle(activityStartYaw, activityStartYaw + 90f, t));
+                if (activityCmdTicks >= 10) finishActivityCmd();
+            }
+            case "Look Up" -> {
+                float t = Math.min(1f, activityCmdTicks / 10f);
+                client.player.setPitch(lerp(activityStartPitch, -45f, t));
+                if (activityCmdTicks >= 10) finishActivityCmd();
+            }
+            case "Look Down" -> {
+                float t = Math.min(1f, activityCmdTicks / 10f);
+                client.player.setPitch(lerp(activityStartPitch, 45f, t));
+                if (activityCmdTicks >= 10) finishActivityCmd();
+            }
+            case "Jump" -> {
+                pressKey(GLFW.GLFW_KEY_SPACE, activityCmdTicks <= 5);
+                if (activityCmdTicks >= 6) { pressKey(GLFW.GLFW_KEY_SPACE, false); finishActivityCmd(); }
+            }
+            case "Sneak" -> {
+                pressKey(GLFW.GLFW_KEY_LEFT_SHIFT, activityCmdTicks <= 15);
+                if (activityCmdTicks >= 16) { pressKey(GLFW.GLFW_KEY_LEFT_SHIFT, false); finishActivityCmd(); }
+            }
+            case "Punch" -> {
+                if (client.crosshairTarget != null &&
+                        client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
+                    BlockHitResult bhr = (BlockHitResult) client.crosshairTarget;
+                    client.interactionManager.attackBlock(bhr.getBlockPos(), bhr.getSide());
+                    client.player.swingHand(Hand.MAIN_HAND);
+                }
+                finishActivityCmd();
+            }
+            case "Click" -> {
+                client.options.useKey.setPressed(true);
+                client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
+                client.options.useKey.setPressed(false);
+                finishActivityCmd();
+            }
+        }
+    }
+
+    private static void startActivityCmd(net.minecraft.entity.player.PlayerEntity player, String cmd) {
+        activityCurrentCmd = cmd;
+        activityCmdTicks = 0;
+        activityStartYaw = player.getYaw();
+        activityStartPitch = player.getPitch();
+    }
+
+    private static void finishActivityCmd() {
+        activityCurrentCmd = "";
+        activityCmdTicks = 0;
+        activityWaitTicks = 3;
     }
 
     // ── Lerp helpers ──────────────────────────────────────────────────────────
@@ -851,20 +671,11 @@ public class FarmBotMod implements ClientModInitializer {
         } else if (currentMode == BotMode.FISH) {
             fishCount = 0; fishingState = FishingState.CASTING;
             fishingCastDelay = 0; fishingReelDelay = 0;
-            fishingWaitTicks = 0; lastBobberY = Double.MAX_VALUE;
-        } else if (currentMode == BotMode.LOG) {
-            treesChopped = 0; logState = LogState.SCANNING;
-            treeQueue.clear(); stumpList.clear(); targetTreePos = null;
-            sublamateMessageCount = 0; lastSublamateTime = 0;
-            chopWaitTicks = 0; growthWaitTicks = 0;
-            walkStuckTicks = 0; replantIndex = 0;
-            logShopDelay = 0; logBuyPhase = 0;
-            logLastX = client.player.getX(); logLastZ = client.player.getZ();
+            fishingWaitTicks = 0; fishingWaterTicks = 0; lastBobberY = Double.MAX_VALUE;
         }
 
         String emoji = currentMode == BotMode.FARM ? "🌾"
-                     : currentMode == BotMode.SLAY ? "⚔️"
-                     : currentMode == BotMode.LOG  ? "🪵" : "🎣";
+                     : currentMode == BotMode.SLAY ? "⚔️" : "🎣";
         client.player.sendMessage(
             Text.literal("§a[BotMaster] " + emoji + " " + currentMode.name() +
                 " started! §7H§f=stop §7J§f=menu"), true);
@@ -874,8 +685,6 @@ public class FarmBotMod implements ClientModInitializer {
                 ? "🖱 Click: **" + clickSpeedMin + "–" + clickSpeedMax + "s**"
                 : currentMode == BotMode.SLAY
                 ? "🎯 CPS: **" + slayCpsMin + "–" + slayCpsMax + "**"
-                : currentMode == BotMode.LOG
-                ? "🌲 Scan radius: **" + logScanRadius + "**"
                 : "🎣 Fishing";
             sendWebhook(
                 emoji + " **BotMaster Started — " + currentMode.name() + "**\n" +
@@ -908,14 +717,11 @@ public class FarmBotMod implements ClientModInitializer {
 
         if (notifySessionEnd && !webhookUrl.isEmpty()) {
             String emoji = currentMode == BotMode.FARM ? "🌾"
-                         : currentMode == BotMode.SLAY ? "⚔️"
-                         : currentMode == BotMode.LOG  ? "🪵" : "🎣";
+                         : currentMode == BotMode.SLAY ? "⚔️" : "🎣";
             String extra = currentMode == BotMode.FARM
                 ? "🌾 Rows: **" + rowCount + "** | Clicks: **" + clickCount + "**\n"
                 : currentMode == BotMode.SLAY
                 ? "⚔️ Kills: **" + slayKills + "** | Clicks: **" + clickCount + "**\n"
-                : currentMode == BotMode.LOG
-                ? "🪵 Trees: **" + treesChopped + "** | Clicks: **" + clickCount + "**\n"
                 : "🎣 Fish: **" + fishCount + "**\n";
             sendWebhook(
                 emoji + " **Session Complete — " + currentMode.name() + "**\n" +
@@ -937,12 +743,11 @@ public class FarmBotMod implements ClientModInitializer {
 
         boolean isFarm = currentMode == BotMode.FARM;
         boolean isSlay = currentMode == BotMode.SLAY;
-        boolean isLog  = currentMode == BotMode.LOG;
         boolean isFish = currentMode == BotMode.FISH;
         int x = 10, y = 10, w = 260;
-        int h = !botActive ? 52 : isSlay ? 220 : isLog ? 210 : isFish ? 120 : 190;
-        int accent = isFarm ? 0xFF00ff88 : isSlay ? 0xFFff4444 : isLog ? 0xFFcc8833 : isFish ? 0xFF4499ff : 0xFF6666dd;
-        int border = isFarm ? 0xFF00ff44 : isSlay ? 0xFFaa2222 : isLog ? 0xFF885522 : isFish ? 0xFF2255aa : 0xFF444488;
+        int h = !botActive ? 52 : isSlay ? 220 : isFish ? 120 : 190;
+        int accent = isFarm ? 0xFF00ff88 : isSlay ? 0xFFff4444 : isFish ? 0xFF4499ff : 0xFF6666dd;
+        int border = isFarm ? 0xFF00ff44 : isSlay ? 0xFFaa2222 : isFish ? 0xFF2255aa : 0xFF444488;
 
         ctx.fill(x, y, x+w, y+h, 0xCC0a0a1a);
         ctx.fill(x, y, x+w, y+2, accent);
@@ -950,8 +755,7 @@ public class FarmBotMod implements ClientModInitializer {
 
         // Title bar
         String modeTag = currentMode == BotMode.NONE ? "§7No job" :
-                         isFarm ? "§a🌾 Farm" : isSlay ? "§c⚔️ Slay" :
-                         isLog  ? "§6🪵 Log"  : "§9🎣 Fish";
+                         isFarm ? "§a🌾 Farm" : isSlay ? "§c⚔️ Slay" : "§9🎣 Fish";
         ctx.drawText(client.textRenderer,
             Text.literal("§fBotMaster §8| " + modeTag + " §8| §eJ§f=menu §eH§f=toggle §eG§f=hud"),
             x+6, y+6, 0xFFFFFF, false);
@@ -1063,52 +867,6 @@ public class FarmBotMod implements ClientModInitializer {
                     x+6, y+134, 0xFFFFFF, false);
             }
 
-        } else if (isLog) {
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7State: §6" + logState.name()),
-                x+6, y+41, 0xFFFFFF, false);
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7Trees Chopped: §f" + treesChopped +
-                    "  §7Queue: §f" + treeQueue.size()),
-                x+6, y+51, 0xFFFFFF, false);
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7Stumps to Replant: §f" + stumpList.size() +
-                    "  §7Idx: §f" + replantIndex),
-                x+6, y+61, 0xFFFFFF, false);
-            if (logState == LogState.WAITING_GROWTH) {
-                int remaining = 2400 - growthWaitTicks;
-                ctx.drawText(client.textRenderer,
-                    Text.literal("§7Growth timer: §e" + formatTime(remaining / 20)),
-                    x+6, y+71, 0xFFFFFF, false);
-            } else if (targetTreePos != null) {
-                ctx.drawText(client.textRenderer,
-                    Text.literal(String.format("§7Target: §f(%d, %d, %d)",
-                        targetTreePos.getX(), targetTreePos.getY(), targetTreePos.getZ())),
-                    x+6, y+71, 0xFFFFFF, false);
-            }
-            // Sapling count in hotbar
-            int sapCount = 0;
-            for (int i = 0; i < 9; i++) {
-                var stack = client.player.getInventory().getStack(i);
-                if (stack.getItem() == Items.SPRUCE_SAPLING) sapCount += stack.getCount();
-            }
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7Saplings: §f" + sapCount),
-                x+6, y+81, 0xFFFFFF, false);
-            ctx.fill(x+4, y+93, x+w-4, y+94, 0xFF333355);
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7Clicks: §f" + clickCount +
-                    "  §7Checks: §e" + activityCheckCount +
-                    "  §7Webhook: " + (webhookUrl.isEmpty() ? "§cNot set" : "§aSet ✔")),
-                x+6, y+98, 0xFFFFFF, false);
-            if (!sessionHistory.isEmpty()) {
-                SessionRecord last = sessionHistory.get(0);
-                ctx.drawText(client.textRenderer,
-                    Text.literal("§7Last: §a+$" + formatMoney(last.profit) +
-                        " §7in §f" + last.duration),
-                    x+6, y+109, 0xFFFFFF, false);
-            }
-
         } else if (isFish) {
             ctx.drawText(client.textRenderer,
                 Text.literal("§7State: §b" + fishingState.name()),
@@ -1129,7 +887,6 @@ public class FarmBotMod implements ClientModInitializer {
         private int view = 0;
         private TextFieldWidget clickMinF, clickMaxF, sessionF, webhookF, usernameF;
         private TextFieldWidget cpsMinF, cpsMaxF, minDistF, maxDistF, bpAlertF;
-        private TextFieldWidget logRadiusF, logHeightF;
 
         public MainScreen(Screen parent) {
             super(Text.literal("BotMaster"));
@@ -1167,13 +924,10 @@ public class FarmBotMod implements ClientModInitializer {
             addDrawableChild(ButtonWidget.builder(Text.literal("⚔️  Slaying"),
                 btn -> { currentMode = BotMode.SLAY; clearAndInit(); })
                 .dimensions(px+pw-160, py+80, 150, 26).build());
-            // Row 2: Log, Fish
-            addDrawableChild(ButtonWidget.builder(Text.literal("🪵  Logging"),
-                btn -> { currentMode = BotMode.LOG; clearAndInit(); })
-                .dimensions(px+10, py+112, 150, 26).build());
+            // Row 2: Fish (centred)
             addDrawableChild(ButtonWidget.builder(Text.literal("🎣  Fishing"),
                 btn -> { currentMode = BotMode.FISH; clearAndInit(); })
-                .dimensions(px+pw-160, py+112, 150, 26).build());
+                .dimensions(cx-75, py+112, 150, 26).build());
 
             // Start/Stop
             boolean canStart = currentMode != BotMode.NONE;
@@ -1213,11 +967,6 @@ public class FarmBotMod implements ClientModInitializer {
             // Backpack + session
             bpAlertF = addField(px+10, fy+12, 150, String.valueOf(backpackAlertPercent));
             sessionF  = addField(px+pw-160, fy+12, 150, String.valueOf(sessionLimitMinutes));
-            fy += 42;
-
-            // Log config
-            logRadiusF = addField(px+10, fy+12, 150, String.valueOf(logScanRadius));
-            logHeightF = addField(px+pw-160, fy+12, 150, String.valueOf(logMinHeight));
             fy += 42;
 
             // Username
@@ -1265,8 +1014,6 @@ public class FarmBotMod implements ClientModInitializer {
             try { maxDistance = Math.max(minDistance+1, Float.parseFloat(maxDistF.getText())); } catch (Exception ignored) {}
             try { backpackAlertPercent = Math.min(100, Math.max(1, Integer.parseInt(bpAlertF.getText()))); } catch (Exception ignored) {}
             try { sessionLimitMinutes = Math.max(0, Integer.parseInt(sessionF.getText())); } catch (Exception ignored) {}
-            try { logScanRadius = Math.max(10, Integer.parseInt(logRadiusF.getText())); } catch (Exception ignored) {}
-            try { logMinHeight = Math.max(4, Integer.parseInt(logHeightF.getText())); } catch (Exception ignored) {}
             if (usernameF != null) minecraftUsername = usernameF.getText().trim();
             if (webhookF != null) webhookUrl = webhookF.getText().trim();
         }
@@ -1308,27 +1055,22 @@ public class FarmBotMod implements ClientModInitializer {
                 ctx.fill(px+8, py+78, px+162, py+108, 0xFF0a1a0a);
             if (currentMode==BotMode.SLAY)
                 ctx.fill(px+pw-162, py+78, px+pw-8, py+108, 0xFF1a0a0a);
-            // Row 2 card highlights
-            if (currentMode==BotMode.LOG)
-                ctx.fill(px+8, py+110, px+162, py+140, 0xFF100d00);
+            // Row 2 card highlight
             if (currentMode==BotMode.FISH)
-                ctx.fill(px+pw-162, py+110, px+pw-8, py+140, 0xFF00080f);
+                ctx.fill(cx-77, py+110, cx+77, py+140, 0xFF00080f);
 
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§8harvest crops"), px+20, py+109, 0xFFFFFF);
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§8kill mobs"), px+pw-145, py+109, 0xFFFFFF);
             ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§8chop trees"), px+20, py+141, 0xFFFFFF);
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§8catch fish"), px+pw-140, py+141, 0xFFFFFF);
+                Text.literal("§8catch fish"), cx-65, py+141, 0xFFFFFF);
 
             ctx.fill(px+4, py+188, px+pw-4, py+189, 0xFF333355);
 
             String jobStr = currentMode==BotMode.NONE ? "§8None selected" :
                             currentMode==BotMode.FARM ? "§a🌾 Farming" :
-                            currentMode==BotMode.SLAY ? "§c⚔️ Slaying" :
-                            currentMode==BotMode.LOG  ? "§6🪵 Logging" : "§9🎣 Fishing";
+                            currentMode==BotMode.SLAY ? "§c⚔️ Slaying" : "§9🎣 Fishing";
             ctx.drawCenteredTextWithShadow(textRenderer,
                 Text.literal("§7Job: " + jobStr), cx, py+193, 0xFFFFFF);
             ctx.drawCenteredTextWithShadow(textRenderer,
@@ -1364,11 +1106,6 @@ public class FarmBotMod implements ClientModInitializer {
                 Text.literal("§7Session Limit (min, 0=∞):"), px+pw-160, fy, 0xAAAAAA);
             fy += 42;
             ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§7Log Scan Radius (blocks):"), px+10, fy, 0xAAAAAA);
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§7Min Tree Height:"), px+pw-160, fy, 0xAAAAAA);
-            fy += 42;
-            ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§7Minecraft Username:"), px+10, fy, 0xAAAAAA);
             fy += 42;
             ctx.drawTextWithShadow(textRenderer,
@@ -1391,8 +1128,7 @@ public class FarmBotMod implements ClientModInitializer {
                 Text.literal("§7$" + formatMoney(perMin) + "/min"), px+18, y+30, 0x44aa44);
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§7⚔ Kills: §f" + slayKills +
-                    "  §7🎣 Fish: §f" + fishCount +
-                    "  §7🪵 Trees: §f" + treesChopped),
+                    "  §7🎣 Fish: §f" + fishCount),
                 px+18, y+42, 0xFFFFFF);
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§7Before: §f$" + formatMoney(balanceBefore) +
