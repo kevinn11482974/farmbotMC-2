@@ -589,8 +589,6 @@ public class FarmBotMod implements ClientModInitializer {
         }
         if (client.world == null) return;
 
-        client.player.setPitch(35f);
-
         switch (snowState) {
             case CLEARING -> {
                 // Click snow every tick
