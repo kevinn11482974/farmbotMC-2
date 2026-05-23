@@ -122,6 +122,7 @@ public class FarmBotMod implements ClientModInitializer {
     private static int snowClickTimer = 0;
     private static int snowCurrentClickEvery = 1;
     private static int snowTeleportDelay = 0;
+    private static int snowFixTimer = 6000;
 
     // ── Activity solver state ─────────────────────────────────────────────────
     private static boolean activitySolverActive = false;
@@ -589,6 +590,12 @@ public class FarmBotMod implements ClientModInitializer {
         }
         if (client.world == null) return;
 
+        // /fix all every 5 minutes
+        if (--snowFixTimer <= 0) {
+            client.player.networkHandler.sendCommand("fix all");
+            snowFixTimer = 6000;
+        }
+
         switch (snowState) {
             case CLEARING -> {
                 // Click snow every tick
@@ -829,6 +836,7 @@ public class FarmBotMod implements ClientModInitializer {
             snowState = SnowState.CLEARING; snowGoingRight = true;
             snowSteppingForward = false; snowStuckTicks = 0;
             snowTeleportDelay = 0; snowClickTimer = 0; snowCurrentClickEvery = 1;
+            snowFixTimer = 6000;
             snowLastX = client.player.getX(); snowLastZ = client.player.getZ();
         }
 
