@@ -632,7 +632,7 @@ public class FarmBotMod implements ClientModInitializer {
         clickCount = 0;
         activityCheckCount = 0;
         wasHandledScreenOpen = false;
-        backpackAlertSent = false;
+
         waitingForBalBefore = true;
         balCheckDelay = 20;
 
