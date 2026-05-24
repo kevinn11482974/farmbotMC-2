@@ -97,6 +97,7 @@ public class FarmBotMod implements ClientModInitializer {
     private static int hawkFlipGrace = 0;
     private static int hawkBlocksBroken = 0;
     private static double hawkLastX = 0;
+    private static double hawkLastZ = 0;
 
     // ── Activity solver state ─────────────────────────────────────────────────
     private static boolean activitySolverActive = false;
@@ -523,9 +524,10 @@ public class FarmBotMod implements ClientModInitializer {
             }
         }
 
-        // Hold one direction, detect wall by lack of movement, then flip
+        // Hold one direction — detect wall by total XZ movement, then flip
         double cx = client.player.getX();
-        double moved = Math.abs(cx - hawkLastX);
+        double cz = client.player.getZ();
+        double moved = Math.hypot(cx - hawkLastX, cz - hawkLastZ);
 
         if (hawkFlipGrace > 0) {
             hawkFlipGrace--;
@@ -549,6 +551,7 @@ public class FarmBotMod implements ClientModInitializer {
             pressKey(GLFW.GLFW_KEY_A, true);
         }
         hawkLastX = cx;
+        hawkLastZ = cz;
     }
 
     // ── Activity solver ───────────────────────────────────────────────────────
@@ -661,7 +664,8 @@ public class FarmBotMod implements ClientModInitializer {
             snowLastX = client.player.getX(); snowLastZ = client.player.getZ();
         } else if (currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO) {
             hawkBlocksBroken = 0; hawkGoingRight = true;
-            hawkStuckTicks = 0; hawkFlipGrace = 0; hawkLastX = client.player.getX();
+            hawkStuckTicks = 0; hawkFlipGrace = 0;
+            hawkLastX = client.player.getX(); hawkLastZ = client.player.getZ();
         }
 
         String emoji = currentMode == BotMode.FARM ? "🌾"
