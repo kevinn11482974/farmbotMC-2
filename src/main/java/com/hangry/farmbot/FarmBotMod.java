@@ -94,6 +94,7 @@ public class FarmBotMod implements ClientModInitializer {
     // ── Hawk state ────────────────────────────────────────────────────────────
     private static boolean hawkGoingRight = true;
     private static int hawkStuckTicks = 0;
+    private static int hawkFlipGrace = 0;
     private static int hawkBlocksBroken = 0;
     private static double hawkLastX = 0;
 
@@ -522,15 +523,22 @@ public class FarmBotMod implements ClientModInitializer {
             }
         }
 
-        // Pure left/right movement — instant flip on wall, no jump, no pause
+        // Hold one direction, detect wall by lack of movement, then flip
         double cx = client.player.getX();
         double moved = Math.abs(cx - hawkLastX);
-        if (moved < 0.01) hawkStuckTicks++;
-        else hawkStuckTicks = 0;
 
-        if (hawkStuckTicks >= STUCK_THRESHOLD) {
+        if (hawkFlipGrace > 0) {
+            hawkFlipGrace--;
             hawkStuckTicks = 0;
-            hawkGoingRight = !hawkGoingRight;
+        } else {
+            if (moved < 0.01) hawkStuckTicks++;
+            else hawkStuckTicks = 0;
+
+            if (hawkStuckTicks >= STUCK_THRESHOLD) {
+                hawkGoingRight = !hawkGoingRight;
+                hawkStuckTicks = 0;
+                hawkFlipGrace = 20;
+            }
         }
 
         if (hawkGoingRight) {
@@ -653,7 +661,7 @@ public class FarmBotMod implements ClientModInitializer {
             snowLastX = client.player.getX(); snowLastZ = client.player.getZ();
         } else if (currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO) {
             hawkBlocksBroken = 0; hawkGoingRight = true;
-            hawkStuckTicks = 0; hawkLastX = client.player.getX();
+            hawkStuckTicks = 0; hawkFlipGrace = 0; hawkLastX = client.player.getX();
         }
 
         String emoji = currentMode == BotMode.FARM ? "🌾"
