@@ -735,9 +735,7 @@ public class FarmBotMod implements ClientModInitializer {
         int x = 10, y = 10, w = 260;
         int h = !botActive ? 52 : isSnow ? 160 : isHawk ? 150 : 190;
         int accent = isFarm ? 0xFF00ff88 : isSnow ? 0xFF00ccff : isHawk ? 0xFFffaa00 : 0xFF6666dd;
-                   : isSnow ? 0xFF00ccff : isHawk ? 0xFFffaa00 : 0xFF6666dd;
         int border = isFarm ? 0xFF00ff44 : isSnow ? 0xFF0088aa : isHawk ? 0xFFaa6600 : 0xFF444488;
-                   : isSnow ? 0xFF0088aa : isHawk ? 0xFFaa6600 : 0xFF444488;
 
         ctx.fill(x, y, x+w, y+h, 0xCC0a0a1a);
         ctx.fill(x, y, x+w, y+2, accent);
