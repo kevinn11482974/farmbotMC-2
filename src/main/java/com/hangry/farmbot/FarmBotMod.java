@@ -13,16 +13,15 @@ import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.client.util.InputUtil;
-import net.minecraft.entity.LivingEntity;
-import net.minecraft.entity.mob.MobEntity;
-import net.minecraft.item.FishingRodItem;
+import net.minecraft.block.Blocks;
+import net.minecraft.block.NetherWartBlock;
 import net.minecraft.item.ShovelItem;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import org.lwjgl.glfw.GLFW;
 
 import java.net.URI;
@@ -32,7 +31,6 @@ import java.net.http.HttpResponse;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
 import java.util.regex.Matcher;
@@ -41,7 +39,7 @@ import java.util.regex.Pattern;
 public class FarmBotMod implements ClientModInitializer {
 
     // ── Mode ──────────────────────────────────────────────────────────────────
-    public enum BotMode { NONE, FARM, SLAY, FISH, SNOW }
+    public enum BotMode { NONE, FARM, SNOW, HAWKJIGARFARMMEGAFASTVIPPRO }
     public static BotMode currentMode = BotMode.NONE;
     public static boolean botActive = false;
     public static boolean showGui = true;
@@ -55,13 +53,6 @@ public class FarmBotMod implements ClientModInitializer {
     public static boolean notifyActivityCheck = true;
     public static boolean notifySessionEnd = true;
     public static boolean notifyBotStart = false;
-
-    // ── Slay settings ─────────────────────────────────────────────────────────
-    public static float slayCpsMin = 3f;
-    public static float slayCpsMax = 7f;
-    public static int backpackAlertPercent = 95;
-    public static float minDistance = 2.0f;
-    public static float maxDistance = 4.0f;
 
     // ── Snow settings ─────────────────────────────────────────────────────────
     public static int snowRows = 32;
@@ -84,30 +75,6 @@ public class FarmBotMod implements ClientModInitializer {
     private static final int JUMP_COOLDOWN = 25;
     private static int postFlipPauseTicks = 0;
 
-    // ── Slay state ────────────────────────────────────────────────────────────
-    private static int slayKills = 0;
-    private static int slayClickTimer = 0;
-    private static int slayClickEvery = 6;
-    private static int strafeDir = 1;
-    private static int strafeSwitchTimer = 0;
-    private static int backpackCurrent = 0;
-    private static int backpackMax = 0;
-    private static boolean backpackAlertSent = false;
-    private static String aimState = "scanning";
-    private static float yawWobble = 0f;
-    private static int wobbleTimer = 0;
-    private static String targetName = "";
-
-    // ── Fish state ────────────────────────────────────────────────────────────
-    public enum FishingState { CASTING, WAITING, REELING }
-    private static FishingState fishingState = FishingState.CASTING;
-    private static int fishingCastDelay = 0;
-    private static int fishingReelDelay = 0;
-    private static int fishingWaitTicks = 0;
-    private static int fishingWaterTicks = 0;
-    private static double lastBobberY = Double.MAX_VALUE;
-    private static int fishCount = 0;
-
     // ── Snow state ────────────────────────────────────────────────────────────
     public enum SnowState { CLEARING, TELEPORTING }
     private static SnowState snowState = SnowState.CLEARING;
@@ -123,6 +90,12 @@ public class FarmBotMod implements ClientModInitializer {
     private static int snowCurrentClickEvery = 1;
     private static int snowTeleportDelay = 0;
     private static int snowFixTimer = 6000;
+
+    // ── Hawk state ────────────────────────────────────────────────────────────
+    private static boolean hawkGoingRight = true;
+    private static int hawkStuckTicks = 0;
+    private static int hawkBlocksBroken = 0;
+    private static double hawkLastX = 0;
 
     // ── Activity solver state ─────────────────────────────────────────────────
     private static boolean activitySolverActive = false;
@@ -141,8 +114,6 @@ public class FarmBotMod implements ClientModInitializer {
     private static int balCheckDelay = 0;
     private static final Pattern BAL_PATTERN =
         Pattern.compile("balance:\\s*\\$([\\d,]+)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern BACKPACK_PATTERN =
-        Pattern.compile("(\\d[\\d,]*)/(\\d[\\d,]*)");
 
     // ── Session history ───────────────────────────────────────────────────────
     public static final List<SessionRecord> sessionHistory = new ArrayList<>();
@@ -221,17 +192,6 @@ public class FarmBotMod implements ClientModInitializer {
                         if (raw.contains("Rain")) mc.player.networkHandler.sendCommand("wv yes");
                         else mc.player.networkHandler.sendCommand("wv no");
                     }
-                }
-            }
-            // Backpack (action bar)
-            if (overlay && raw.contains("Backpack")) {
-                Matcher bpM = BACKPACK_PATTERN.matcher(raw);
-                if (bpM.find()) {
-                    try {
-                        backpackCurrent = Integer.parseInt(bpM.group(1).replace(",", ""));
-                        backpackMax = Integer.parseInt(bpM.group(2).replace(",", ""));
-                        checkBackpackFull();
-                    } catch (Exception ignored) {}
                 }
             }
         });
@@ -338,9 +298,8 @@ public class FarmBotMod implements ClientModInitializer {
 
         // Route to mode
         if      (currentMode == BotMode.FARM) tickFarm(client);
-        else if (currentMode == BotMode.SLAY) tickSlay(client);
-        else if (currentMode == BotMode.FISH) tickFish(client);
         else if (currentMode == BotMode.SNOW) tickSnow(client);
+        else if (currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO) tickHawk(client);
     }
 
     // ── Farm tick ─────────────────────────────────────────────────────────────
@@ -419,164 +378,6 @@ public class FarmBotMod implements ClientModInitializer {
                     ((BlockHitResult) client.crosshairTarget).getSide());
                 client.player.swingHand(Hand.MAIN_HAND);
                 clickCount++;
-            }
-        }
-    }
-
-    // ── Slay tick ─────────────────────────────────────────────────────────────
-    private void tickSlay(MinecraftClient client) {
-        if (client.world == null) return;
-        Vec3d pos = client.player.getPos();
-
-        // 360° scan — find ALL mobs in radius regardless of look direction
-        List<LivingEntity> mobs = client.world.getEntitiesByClass(
-            LivingEntity.class,
-            new Box(pos.x-15, pos.y-5, pos.z-15, pos.x+15, pos.y+5, pos.z+15),
-            e -> e instanceof MobEntity && !e.isDead() && e != client.player
-        );
-        mobs.sort(Comparator.comparingDouble(e -> e.squaredDistanceTo(client.player)));
-
-        // No mobs — idle slow scan
-        if (mobs.isEmpty()) {
-            aimState = "scanning — no mobs";
-            targetName = "";
-            stopAllMovement();
-            // Slow client-side yaw rotation — looks idle, not robotic
-            client.player.setYaw(client.player.getYaw() + 1.5f);
-            return;
-        }
-
-        LivingEntity target = mobs.get(0);
-        double dist = Math.sqrt(target.squaredDistanceTo(client.player));
-        targetName = target.getType().getName().getString();
-
-        // ── Aim at target ─────────────────────────────────────────────────────
-        double dx = target.getX() - client.player.getX();
-        double dy = (target.getY() + target.getStandingEyeHeight() / 2.0)
-                  - (client.player.getY() + client.player.getStandingEyeHeight());
-        double dz = target.getZ() - client.player.getZ();
-        double hDist = Math.sqrt(dx * dx + dz * dz);
-
-        float targetYaw   = (float) Math.toDegrees(Math.atan2(-dx, dz));
-        float targetPitch = (float)(-Math.toDegrees(Math.atan2(dy, hDist)));
-
-        // Random wobble every 10 ticks — humanizes aim
-        wobbleTimer++;
-        if (wobbleTimer >= 10) {
-            wobbleTimer = 0;
-            yawWobble = (random.nextFloat() - 0.5f) * 2.5f;
-        }
-
-        // Smooth lerp toward target — not instant snap
-        float newYaw   = lerpAngle(client.player.getYaw(), targetYaw + yawWobble, 0.35f);
-        float newPitch = lerp(client.player.getPitch(), targetPitch, 0.35f);
-        client.player.setYaw(newYaw);
-        client.player.setPitch(Math.max(-90f, Math.min(90f, newPitch)));
-
-        // ── Movement ──────────────────────────────────────────────────────────
-        stopAllMovement();
-
-        if (dist < minDistance) {
-            // Too close — back up AND strafe
-            aimState = "too close — backing + strafing";
-            pressKey(GLFW.GLFW_KEY_S, true);
-            pressKey(strafeDir == 1 ? GLFW.GLFW_KEY_D : GLFW.GLFW_KEY_A, true);
-        } else if (dist <= maxDistance) {
-            // Sweet spot — strafe only
-            aimState = "kiting @ " + String.format("%.1f", dist) + "b";
-            pressKey(strafeDir == 1 ? GLFW.GLFW_KEY_D : GLFW.GLFW_KEY_A, true);
-        } else {
-            // Far — stand still
-            aimState = "holding @ " + String.format("%.1f", dist) + "b";
-        }
-
-        // Randomize strafe direction every 40-80 ticks
-        strafeSwitchTimer++;
-        if (strafeSwitchTimer >= 40 + random.nextInt(40)) {
-            strafeSwitchTimer = 0;
-            strafeDir *= -1;
-        }
-
-        // ── Fire crossbow (RIGHT click) ───────────────────────────────────────
-        slayClickTimer++;
-        if (slayClickTimer >= slayClickEvery) {
-            slayClickTimer = 0;
-            float cps = slayCpsMin + random.nextFloat() * (slayCpsMax - slayCpsMin);
-            slayClickEvery = Math.max(1, (int)(20f / cps));
-
-            // Right click = use item = fire crossbow
-            client.options.useKey.setPressed(true);
-            client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
-            client.options.useKey.setPressed(false);
-            client.player.swingHand(Hand.MAIN_HAND);
-            clickCount++;
-
-            // Track kill
-            if (target.getHealth() <= 0) slayKills++;
-        }
-    }
-
-    // ── Fish tick ─────────────────────────────────────────────────────────────
-    private void tickFish(MinecraftClient client) {
-        if (!(client.player.getMainHandStack().getItem() instanceof FishingRodItem)) {
-            client.player.sendMessage(Text.literal("§c[BotMaster] Equip a fishing rod!"), true);
-            botActive = false;
-            return;
-        }
-
-        if (fishingCastDelay > 0) { fishingCastDelay--; return; }
-
-        switch (fishingState) {
-            case CASTING -> {
-                client.options.useKey.setPressed(true);
-                client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
-                client.options.useKey.setPressed(false);
-                fishingWaitTicks = 0;
-                fishingWaterTicks = 0;
-                lastBobberY = Double.MAX_VALUE;
-                fishingState = FishingState.WAITING;
-            }
-            case WAITING -> {
-                fishingWaitTicks++;
-                var hook = client.player.fishHook;
-                if (hook == null) {
-                    // Give the bobber up to 20 ticks to appear before recasting
-                    if (fishingWaitTicks > 20) {
-                        fishingCastDelay = 5 + random.nextInt(6);
-                        fishingState = FishingState.CASTING;
-                    }
-                    return;
-                }
-                fishingWaterTicks++;
-                double bobberY = hook.getY();
-                if (lastBobberY == Double.MAX_VALUE) {
-                    lastBobberY = bobberY;
-                    return;
-                }
-                // Only detect a bite after 60 ticks of water soak
-                if (fishingWaterTicks >= 60 && bobberY < lastBobberY - 0.08) {
-                    fishingReelDelay = 1 + random.nextInt(3);
-                    fishingState = FishingState.REELING;
-                }
-                lastBobberY = bobberY;
-            }
-            case REELING -> {
-                if (fishingReelDelay > 0) { fishingReelDelay--; return; }
-                // If hook already gone, just recast
-                if (client.player.fishHook == null) {
-                    fishingWaterTicks = 0;
-                    fishingCastDelay = 5 + random.nextInt(6);
-                    fishingState = FishingState.CASTING;
-                    return;
-                }
-                client.options.useKey.setPressed(true);
-                client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
-                client.options.useKey.setPressed(false);
-                fishCount++;
-                clickCount++;
-                fishingWaterTicks = 0;
-                fishingCastDelay = 5 + random.nextInt(6);
-                fishingState = FishingState.CASTING;
             }
         }
     }
@@ -700,6 +501,48 @@ public class FarmBotMod implements ClientModInitializer {
         }
     }
 
+    // ── Hawk tick ─────────────────────────────────────────────────────────────
+    private void tickHawk(MinecraftClient client) {
+        if (client.world == null) return;
+
+        // Scan 9x9x9 cube and break fully grown nether wart directly
+        BlockPos origin = client.player.getBlockPos();
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dy = -4; dy <= 4; dy++) {
+                for (int dz = -4; dz <= 4; dz++) {
+                    BlockPos checkPos = origin.add(dx, dy, dz);
+                    var bs = client.world.getBlockState(checkPos);
+                    if (bs.getBlock() == Blocks.NETHER_WART &&
+                            bs.get(NetherWartBlock.AGE) == 3) {
+                        client.interactionManager.attackBlock(checkPos, Direction.UP);
+                        hawkBlocksBroken++;
+                        clickCount++;
+                    }
+                }
+            }
+        }
+
+        // Pure left/right movement — instant flip on wall, no jump, no pause
+        double cx = client.player.getX();
+        double moved = Math.abs(cx - hawkLastX);
+        if (moved < 0.01) hawkStuckTicks++;
+        else hawkStuckTicks = 0;
+
+        if (hawkStuckTicks >= STUCK_THRESHOLD) {
+            hawkStuckTicks = 0;
+            hawkGoingRight = !hawkGoingRight;
+        }
+
+        if (hawkGoingRight) {
+            pressKey(GLFW.GLFW_KEY_A, false);
+            pressKey(GLFW.GLFW_KEY_D, true);
+        } else {
+            pressKey(GLFW.GLFW_KEY_D, false);
+            pressKey(GLFW.GLFW_KEY_A, true);
+        }
+        hawkLastX = cx;
+    }
+
     // ── Activity solver ───────────────────────────────────────────────────────
     private void tickActivitySolver(MinecraftClient client) {
         if (!activitySolverActive || client.player == null) return;
@@ -777,28 +620,6 @@ public class FarmBotMod implements ClientModInitializer {
         return a + diff * t;
     }
 
-    // ── Backpack check ────────────────────────────────────────────────────────
-    private void checkBackpackFull() {
-        if (backpackMax <= 0) return;
-        int pct = (backpackCurrent * 100) / backpackMax;
-        if (pct >= backpackAlertPercent && !backpackAlertSent) {
-            backpackAlertSent = true;
-            sendWebhook(
-                "🎒 **Backpack " + pct + "% Full!**\n" +
-                "👤 Player: **" + minecraftUsername + "**\n" +
-                "📦 " + backpackCurrent + "/" + backpackMax + " capacity\n" +
-                "⚔️ Kills: **" + slayKills + "**\n" +
-                "⏱ Session: **" + formatTime((System.currentTimeMillis() - startTime) / 1000) + "**\n" +
-                "ℹ️ Bot continues — empty backpack when ready!"
-            );
-            MinecraftClient mc = MinecraftClient.getInstance();
-            if (mc.player != null)
-                mc.player.sendMessage(
-                    Text.literal("§c[BotMaster] §eBackpack " + pct + "% full! Check Discord!"), false);
-        }
-        if (pct < backpackAlertPercent - 5) backpackAlertSent = false;
-    }
-
     // ── Start / Stop ──────────────────────────────────────────────────────────
     private void startBot(MinecraftClient client) {
         if (currentMode == BotMode.SNOW &&
@@ -823,14 +644,6 @@ public class FarmBotMod implements ClientModInitializer {
             lastY = client.player.getY();
             float speed = clickSpeedMin + random.nextFloat() * (clickSpeedMax - clickSpeedMin);
             currentClickEvery = Math.max(1, (int)(speed / 0.05f));
-        } else if (currentMode == BotMode.SLAY) {
-            slayKills = 0; slayClickTimer = 0;
-            strafeDir = 1; strafeSwitchTimer = 0;
-            aimState = "scanning"; targetName = "";
-        } else if (currentMode == BotMode.FISH) {
-            fishCount = 0; fishingState = FishingState.CASTING;
-            fishingCastDelay = 0; fishingReelDelay = 0;
-            fishingWaitTicks = 0; fishingWaterTicks = 0; lastBobberY = Double.MAX_VALUE;
         } else if (currentMode == BotMode.SNOW) {
             snowRowCount = 0; snowBlocksBroken = 0;
             snowState = SnowState.CLEARING; snowGoingRight = true;
@@ -838,11 +651,14 @@ public class FarmBotMod implements ClientModInitializer {
             snowTeleportDelay = 0; snowClickTimer = 0; snowCurrentClickEvery = 1;
             snowFixTimer = 6000;
             snowLastX = client.player.getX(); snowLastZ = client.player.getZ();
+        } else if (currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO) {
+            hawkBlocksBroken = 0; hawkGoingRight = true;
+            hawkStuckTicks = 0; hawkLastX = client.player.getX();
         }
 
         String emoji = currentMode == BotMode.FARM ? "🌾"
-                     : currentMode == BotMode.SLAY ? "⚔️"
-                     : currentMode == BotMode.SNOW ? "❄️" : "🎣";
+                     : currentMode == BotMode.SNOW ? "❄️"
+                     : currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? "⚡" : "🌱";
         client.player.sendMessage(
             Text.literal("§a[BotMaster] " + emoji + " " + currentMode.name() +
                 " started! §7H§f=stop §7J§f=menu"), true);
@@ -850,11 +666,11 @@ public class FarmBotMod implements ClientModInitializer {
         if (notifyBotStart && !webhookUrl.isEmpty()) {
             String detail = currentMode == BotMode.FARM
                 ? "🖱 Click: **" + clickSpeedMin + "–" + clickSpeedMax + "s**"
-                : currentMode == BotMode.SLAY
-                ? "🎯 CPS: **" + slayCpsMin + "–" + slayCpsMax + "**"
                 : currentMode == BotMode.SNOW
                 ? "❄️ Rows: **" + snowRows + "** | Width: **" + snowRowWidth + "**"
-                : "🎣 Fishing";
+                : currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO
+                ? "⚡ Nether wart 9x9x9 harvest"
+                : "";
             sendWebhook(
                 emoji + " **BotMaster Started — " + currentMode.name() + "**\n" +
                 "👤 Player: **" + minecraftUsername + "**\n" +
@@ -881,20 +697,20 @@ public class FarmBotMod implements ClientModInitializer {
         String time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"));
         long perMin = elapsed > 0 ? (profit * 60) / elapsed : 0;
 
-        sessionHistory.add(0, new SessionRecord(time, duration, currentMode.name(), profit, slayKills));
+        sessionHistory.add(0, new SessionRecord(time, duration, currentMode.name(), profit, 0));
         if (sessionHistory.size() > 10) sessionHistory.remove(sessionHistory.size() - 1);
 
         if (notifySessionEnd && !webhookUrl.isEmpty()) {
             String emoji = currentMode == BotMode.FARM ? "🌾"
-                         : currentMode == BotMode.SLAY ? "⚔️"
-                         : currentMode == BotMode.SNOW ? "❄️" : "🎣";
+                         : currentMode == BotMode.SNOW ? "❄️"
+                         : "🌱";
             String extra = currentMode == BotMode.FARM
                 ? "🌾 Rows: **" + rowCount + "** | Clicks: **" + clickCount + "**\n"
-                : currentMode == BotMode.SLAY
-                ? "⚔️ Kills: **" + slayKills + "** | Clicks: **" + clickCount + "**\n"
                 : currentMode == BotMode.SNOW
                 ? "❄️ Cycles: **" + snowCycleCount + "** | Blocks: **" + snowBlocksBroken + "**\n"
-                : "🎣 Fish: **" + fishCount + "**\n";
+                : currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO
+                ? "⚡ Blocks: **" + hawkBlocksBroken + "**\n"
+                : "";
             sendWebhook(
                 emoji + " **Session Complete — " + currentMode.name() + "**\n" +
                 "👤 Player: **" + minecraftUsername + "**\n" +
@@ -914,15 +730,14 @@ public class FarmBotMod implements ClientModInitializer {
         if (client.player == null) return;
 
         boolean isFarm = currentMode == BotMode.FARM;
-        boolean isSlay = currentMode == BotMode.SLAY;
-        boolean isFish = currentMode == BotMode.FISH;
         boolean isSnow = currentMode == BotMode.SNOW;
+        boolean isHawk = currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO;
         int x = 10, y = 10, w = 260;
-        int h = !botActive ? 52 : isSlay ? 220 : isFish ? 120 : isSnow ? 160 : 190;
-        int accent = isFarm ? 0xFF00ff88 : isSlay ? 0xFFff4444 : isFish ? 0xFF4499ff
-                   : isSnow ? 0xFF00ccff : 0xFF6666dd;
-        int border = isFarm ? 0xFF00ff44 : isSlay ? 0xFFaa2222 : isFish ? 0xFF2255aa
-                   : isSnow ? 0xFF0088aa : 0xFF444488;
+        int h = !botActive ? 52 : isSnow ? 160 : isHawk ? 150 : 190;
+        int accent = isFarm ? 0xFF00ff88 : isSnow ? 0xFF00ccff : isHawk ? 0xFFffaa00 : 0xFF6666dd;
+                   : isSnow ? 0xFF00ccff : isHawk ? 0xFFffaa00 : 0xFF6666dd;
+        int border = isFarm ? 0xFF00ff44 : isSnow ? 0xFF0088aa : isHawk ? 0xFFaa6600 : 0xFF444488;
+                   : isSnow ? 0xFF0088aa : isHawk ? 0xFFaa6600 : 0xFF444488;
 
         ctx.fill(x, y, x+w, y+h, 0xCC0a0a1a);
         ctx.fill(x, y, x+w, y+2, accent);
@@ -930,8 +745,8 @@ public class FarmBotMod implements ClientModInitializer {
 
         // Title bar
         String modeTag = currentMode == BotMode.NONE ? "§7No job" :
-                         isFarm ? "§a🌾 Farm" : isSlay ? "§c⚔️ Slay" :
-                         isSnow ? "§b❄ Snow"  : "§9🎣 Fish";
+                         isFarm ? "§a🌾 Farm" : isSnow ? "§b❄ Snow" :
+                         isHawk ? "§6⚡ HAWK" : "§7Unknown";
         ctx.drawText(client.textRenderer,
             Text.literal("§fBotMaster §8| " + modeTag + " §8| §eJ§f=menu §eH§f=toggle §eG§f=hud"),
             x+6, y+6, 0xFFFFFF, false);
@@ -985,76 +800,6 @@ public class FarmBotMod implements ClientModInitializer {
                     x+6, y+106, 0xFFFFFF, false);
             }
 
-        } else if (isSlay) {
-            long secs = Math.max(1, elapsed);
-            float kpm = (slayKills * 60f) / secs;
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7Kills: §f" + slayKills +
-                    String.format("  §7K/min: §f%.1f", kpm) +
-                    "  §7Clicks: §f" + clickCount),
-                x+6, y+41, 0xFFFFFF, false);
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7Target: §f" + (targetName.isEmpty() ? "§8none" : targetName)),
-                x+6, y+51, 0xFFFFFF, false);
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7State: §f" + aimState),
-                x+6, y+61, 0xFFFFFF, false);
-            ctx.drawText(client.textRenderer,
-                Text.literal(String.format("§7Yaw: §f%.1f  §7Pitch: §f%.1f  §7Strafe: §f%s",
-                    client.player.getYaw(), client.player.getPitch(),
-                    strafeDir == 1 ? "→R" : "←L")),
-                x+6, y+71, 0xFFFFFF, false);
-            ctx.fill(x+4, y+83, x+w-4, y+84, 0xFF333355);
-
-            // Backpack
-            if (backpackMax > 0) {
-                int pct = (backpackCurrent * 100) / backpackMax;
-                String bpColor = pct >= backpackAlertPercent ? "§c" : pct >= 70 ? "§e" : "§a";
-                ctx.drawText(client.textRenderer,
-                    Text.literal("§7Backpack: " + bpColor + backpackCurrent +
-                        "/" + backpackMax + " (" + pct + "%)"),
-                    x+6, y+88, 0xFFFFFF, false);
-                // Bar
-                int barW = w-14;
-                int filled = Math.min(barW, (barW * pct) / 100);
-                ctx.fill(x+7, y+100, x+7+barW, y+106, 0xFF222233);
-                int barCol = pct >= backpackAlertPercent ? 0xFFff4444 :
-                             pct >= 70 ? 0xFFffcc44 : 0xFF44ff88;
-                ctx.fill(x+7, y+100, x+7+filled, y+106, barCol);
-            } else {
-                ctx.drawText(client.textRenderer,
-                    Text.literal("§7Backpack: §8waiting for data..."),
-                    x+6, y+88, 0xFFFFFF, false);
-            }
-
-            ctx.fill(x+4, y+109, x+w-4, y+110, 0xFF333355);
-            ctx.drawText(client.textRenderer,
-                Text.literal(String.format("§7X:§f%.0f §7Z:§f%.0f §7Y:§f%.0f",
-                    client.player.getX(), client.player.getZ(), client.player.getY())),
-                x+6, y+113, 0xFFFFFF, false);
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7Checks: §e" + activityCheckCount +
-                    "  §7Webhook: " + (webhookUrl.isEmpty() ? "§cNot set" : "§aSet ✔")),
-                x+6, y+123, 0xFFFFFF, false);
-            if (!sessionHistory.isEmpty()) {
-                SessionRecord last = sessionHistory.get(0);
-                ctx.drawText(client.textRenderer,
-                    Text.literal("§7Last: §f" + last.kills + " kills §7in §f" + last.duration),
-                    x+6, y+134, 0xFFFFFF, false);
-            }
-
-        } else if (isFish) {
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7State: §b" + fishingState.name()),
-                x+6, y+41, 0xFFFFFF, false);
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7Fish Caught: §f" + fishCount),
-                x+6, y+51, 0xFFFFFF, false);
-            ctx.drawText(client.textRenderer,
-                Text.literal("§7Checks: §e" + activityCheckCount +
-                    "  §7Webhook: " + (webhookUrl.isEmpty() ? "§cNot set" : "§aSet ✔")),
-                x+6, y+61, 0xFFFFFF, false);
-
         } else if (isSnow) {
             ctx.drawText(client.textRenderer,
                 Text.literal("§7State: §b" + snowState.name() +
@@ -1087,6 +832,28 @@ public class FarmBotMod implements ClientModInitializer {
                         " §7in §f" + last.duration),
                     x+6, y+109, 0xFFFFFF, false);
             }
+
+        } else if (isHawk) {
+            long secs = Math.max(1, elapsed);
+            long bpm = (hawkBlocksBroken * 60L) / secs;
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Blocks: §f" + hawkBlocksBroken + " broken"),
+                x+6, y+41, 0xFFFFFF, false);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Blocks/min: §6" + bpm),
+                x+6, y+51, 0xFFFFFF, false);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Dir: §f" + (hawkGoingRight ? "→R" : "←L")),
+                x+6, y+61, 0xFFFFFF, false);
+            ctx.fill(x+4, y+73, x+w-4, y+74, 0xFF332200);
+            ctx.drawText(client.textRenderer,
+                Text.literal(String.format("§7X:§f%.0f §7Z:§f%.0f §7Y:§f%.0f",
+                    client.player.getX(), client.player.getZ(), client.player.getY())),
+                x+6, y+77, 0xFFFFFF, false);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Checks: §e" + activityCheckCount +
+                    "  §7Webhook: " + (webhookUrl.isEmpty() ? "§cNot set" : "§aSet ✔")),
+                x+6, y+88, 0xFFFFFF, false);
         }
     }
 
@@ -1095,7 +862,6 @@ public class FarmBotMod implements ClientModInitializer {
         private final Screen parent;
         private int view = 0;
         private TextFieldWidget clickMinF, clickMaxF, sessionF, webhookF, usernameF;
-        private TextFieldWidget cpsMinF, cpsMaxF, minDistF, maxDistF, bpAlertF;
         private TextFieldWidget snowRowsF, snowRowWidthF;
 
         public MainScreen(Screen parent) {
@@ -1106,7 +872,7 @@ public class FarmBotMod implements ClientModInitializer {
         @Override
         protected void init() {
             int cx = width/2, cy = height/2;
-            int pw = 340, ph = 400;
+            int pw = 340, ph = 350;
             int px = cx-pw/2, py = cy-ph/2;
 
             // Tabs
@@ -1121,26 +887,23 @@ public class FarmBotMod implements ClientModInitializer {
             else if (view == 1) initConfigView(px, py, pw, cx, cy);
 
             addDrawableChild(ButtonWidget.builder(Text.literal("Close"), btn -> close())
-                .dimensions(cx-40, py+ph-26, 80, 18).build());
+                .dimensions(cx-40, py+ph-24, 80, 18).build());
         }
 
         protected void clearAndInit() { clearChildren(); init(); }
 
         private void initJobView(int px, int py, int pw, int cx, int cy) {
-            // Row 1: Farm, Slay
+            // Row 1: Farm, Snow
             addDrawableChild(ButtonWidget.builder(Text.literal("🌾  Farming"),
                 btn -> { currentMode = BotMode.FARM; clearAndInit(); })
                 .dimensions(px+10, py+80, 150, 26).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("⚔️  Slaying"),
-                btn -> { currentMode = BotMode.SLAY; clearAndInit(); })
-                .dimensions(px+pw-160, py+80, 150, 26).build());
-            // Row 2: Fish, Snow
-            addDrawableChild(ButtonWidget.builder(Text.literal("🎣  Fishing"),
-                btn -> { currentMode = BotMode.FISH; clearAndInit(); })
-                .dimensions(px+10, py+112, 150, 26).build());
+            // Row 2: Hawk (centred)
             addDrawableChild(ButtonWidget.builder(Text.literal("❄️  Snowing"),
                 btn -> { currentMode = BotMode.SNOW; clearAndInit(); })
-                .dimensions(px+pw-160, py+112, 150, 26).build());
+                .dimensions(px+pw-160, py+80, 150, 26).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("⚡  HawkMode"),
+                btn -> { currentMode = BotMode.HAWKJIGARFARMMEGAFASTVIPPRO; clearAndInit(); })
+                .dimensions(cx-75, py+112, 150, 26).build());
 
             // Start/Stop
             boolean canStart = currentMode != BotMode.NONE;
@@ -1156,46 +919,34 @@ public class FarmBotMod implements ClientModInitializer {
                     if (botActive) mod.startBot(c);
                     else mod.stopBot(c);
                     clearAndInit();
-                }).dimensions(cx-80, py+156, 160, 24).build());
+                }).dimensions(cx-80, py+152, 160, 24).build());
         }
 
         private void initConfigView(int px, int py, int pw, int cx, int cy) {
-            int fy = py+80;
+            int fy = py+68;
 
             // Farm
             clickMinF = addField(px+10, fy+12, 150, String.valueOf(clickSpeedMin));
             clickMaxF = addField(px+pw-160, fy+12, 150, String.valueOf(clickSpeedMax));
-            fy += 42;
+            fy += 36;
 
-            // Slay CPS
-            cpsMinF = addField(px+10, fy+12, 150, String.valueOf(slayCpsMin));
-            cpsMaxF = addField(px+pw-160, fy+12, 150, String.valueOf(slayCpsMax));
-            fy += 42;
-
-            // Distance
-            minDistF = addField(px+10, fy+12, 150, String.valueOf(minDistance));
-            maxDistF = addField(px+pw-160, fy+12, 150, String.valueOf(maxDistance));
-            fy += 42;
-
-            // Backpack + session
-            bpAlertF = addField(px+10, fy+12, 150, String.valueOf(backpackAlertPercent));
-            sessionF  = addField(px+pw-160, fy+12, 150, String.valueOf(sessionLimitMinutes));
-            fy += 42;
+            sessionF = addField(px+10, fy+12, 150, String.valueOf(sessionLimitMinutes));
+            fy += 36;
 
             // Snow
             snowRowsF     = addField(px+10, fy+12, 150, String.valueOf(snowRows));
             snowRowWidthF = addField(px+pw-160, fy+12, 150, String.valueOf(snowRowWidth));
-            fy += 42;
+            fy += 36;
 
             // Username
             usernameF = addField(px+10, fy+12, pw-20, minecraftUsername);
-            fy += 42;
+            fy += 36;
 
             // Webhook
             webhookF = addField(px+10, fy+12, pw-20, webhookUrl);
-            fy += 36;
+            fy += 28;
 
-            // Notification toggles (just buttons that flip booleans)
+            // Notification toggles (auto-saved when closing)
             addDrawableChild(ButtonWidget.builder(
                 Text.literal("Notify Start: " + (notifyBotStart ? "§aON" : "§cOFF")),
                 btn -> { notifyBotStart = !notifyBotStart; clearAndInit(); })
@@ -1208,12 +959,6 @@ public class FarmBotMod implements ClientModInitializer {
                 Text.literal("Notify Check: " + (notifyActivityCheck ? "§aON" : "§cOFF")),
                 btn -> { notifyActivityCheck = !notifyActivityCheck; clearAndInit(); })
                 .dimensions(px+230, fy, 100, 16).build());
-            fy += 26;
-
-            // Save
-            addDrawableChild(ButtonWidget.builder(Text.literal("Save & Close"),
-                btn -> { saveConfig(); close(); })
-                .dimensions(cx-60, fy, 120, 18).build());
         }
 
         private TextFieldWidget addField(int x, int y, int w, String val) {
@@ -1226,11 +971,6 @@ public class FarmBotMod implements ClientModInitializer {
         private void saveConfig() {
             try { clickSpeedMin = Math.max(0.05f, Float.parseFloat(clickMinF.getText())); } catch (Exception ignored) {}
             try { clickSpeedMax = Math.max(clickSpeedMin, Float.parseFloat(clickMaxF.getText())); } catch (Exception ignored) {}
-            try { slayCpsMin = Math.max(1f, Float.parseFloat(cpsMinF.getText())); } catch (Exception ignored) {}
-            try { slayCpsMax = Math.max(slayCpsMin, Float.parseFloat(cpsMaxF.getText())); } catch (Exception ignored) {}
-            try { minDistance = Math.max(1f, Float.parseFloat(minDistF.getText())); } catch (Exception ignored) {}
-            try { maxDistance = Math.max(minDistance+1, Float.parseFloat(maxDistF.getText())); } catch (Exception ignored) {}
-            try { backpackAlertPercent = Math.min(100, Math.max(1, Integer.parseInt(bpAlertF.getText()))); } catch (Exception ignored) {}
             try { sessionLimitMinutes = Math.max(0, Integer.parseInt(sessionF.getText())); } catch (Exception ignored) {}
             try { snowRows = Math.max(1, Integer.parseInt(snowRowsF.getText())); } catch (Exception ignored) {}
             try { snowRowWidth = Math.max(1, Integer.parseInt(snowRowWidthF.getText())); } catch (Exception ignored) {}
@@ -1241,14 +981,14 @@ public class FarmBotMod implements ClientModInitializer {
         @Override
         public void render(DrawContext ctx, int mx, int my, float delta) {
             int cx = width/2, cy = height/2;
-            int pw = 340, ph = 400;
+            int pw = 340, ph = 350;
             int px = cx-pw/2, py = cy-ph/2;
             int accent = currentMode==BotMode.FARM ? 0xFF00ff88 :
-                         currentMode==BotMode.SLAY ? 0xFFff4444 :
-                         currentMode==BotMode.SNOW ? 0xFF00ccff : 0xFF6666dd;
+                         currentMode==BotMode.SNOW ? 0xFF00ccff :
+                         currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? 0xFFffaa00 : 0xFF6666dd;
             int border = currentMode==BotMode.FARM ? 0xFF00ff44 :
-                         currentMode==BotMode.SLAY ? 0xFFaa2222 :
-                         currentMode==BotMode.SNOW ? 0xFF0088aa : 0xFF444488;
+                         currentMode==BotMode.SNOW ? 0xFF0088aa :
+                         currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? 0xFFaa6600 : 0xFF444488;
 
             ctx.fill(px, py, px+pw, py+ph, 0xEE0a0a1a);
             ctx.fill(px, py, px+pw, py+3, accent);
@@ -1275,38 +1015,34 @@ public class FarmBotMod implements ClientModInitializer {
             // Row 1 card highlights
             if (currentMode==BotMode.FARM)
                 ctx.fill(px+8, py+78, px+162, py+108, 0xFF0a1a0a);
-            if (currentMode==BotMode.SLAY)
-                ctx.fill(px+pw-162, py+78, px+pw-8, py+108, 0xFF1a0a0a);
             // Row 2 card highlights
-            if (currentMode==BotMode.FISH)
-                ctx.fill(px+8, py+110, px+162, py+140, 0xFF00080f);
             if (currentMode==BotMode.SNOW)
-                ctx.fill(px+pw-162, py+110, px+pw-8, py+140, 0xFF001a22);
+                ctx.fill(px+pw-162, py+78, px+pw-8, py+108, 0xFF001a22);
 
+            if (currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO)
+                ctx.fill(px+8, py+110, px+pw-8, py+140, 0xFF221100);
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§8harvest crops"), px+20, py+109, 0xFFFFFF);
             ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§8kill mobs"), px+pw-145, py+109, 0xFFFFFF);
+                Text.literal("§8break snow"), px+pw-145, py+109, 0xFFFFFF);
             ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§8catch fish"), px+20, py+141, 0xFFFFFF);
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§8break snow"), px+pw-145, py+141, 0xFFFFFF);
+                Text.literal("§8nether wart 9x9x9"), cx-50, py+141, 0xFFFFFF);
 
-            ctx.fill(px+4, py+188, px+pw-4, py+189, 0xFF333355);
+            ctx.fill(px+4, py+155, px+pw-4, py+156, 0xFF333355);
 
             String jobStr = currentMode==BotMode.NONE ? "§8None selected" :
                             currentMode==BotMode.FARM ? "§a🌾 Farming" :
-                            currentMode==BotMode.SLAY ? "§c⚔️ Slaying" :
-                            currentMode==BotMode.SNOW ? "§b❄️ Snowing" : "§9🎣 Fishing";
+                            currentMode==BotMode.SNOW ? "§b❄️ Snowing" :
+                            currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? "§6⚡ HawkMode" : "§8None selected";
             ctx.drawCenteredTextWithShadow(textRenderer,
-                Text.literal("§7Job: " + jobStr), cx, py+193, 0xFFFFFF);
+                Text.literal("§7Job: " + jobStr), cx, py+160, 0xFFFFFF);
             ctx.drawCenteredTextWithShadow(textRenderer,
                 Text.literal("§7Status: " + (botActive ? "§a● Running" : "§c● Stopped")),
-                cx, py+205, 0xFFFFFF);
+                cx, py+172, 0xFFFFFF);
             if (botActive) {
                 long el = (System.currentTimeMillis() - startTime) / 1000;
                 ctx.drawCenteredTextWithShadow(textRenderer,
-                    Text.literal("§7Session: §f" + formatTime(el)), cx, py+217, 0xFFFFFF);
+                    Text.literal("§7Session: §f" + formatTime(el)), cx, py+184, 0xFFFFFF);
             }
         }
 
@@ -1316,30 +1052,18 @@ public class FarmBotMod implements ClientModInitializer {
                 Text.literal("§a▸ Farm — Click Speed (sec)"), px+10, fy, 0x44aa44);
             ctx.drawTextWithShadow(textRenderer, Text.literal("§7Min:"), px+10, fy+4, 0xAAAAAA);
             ctx.drawTextWithShadow(textRenderer, Text.literal("§7Max:"), px+pw-160, fy+4, 0xAAAAAA);
-            fy += 42;
+            fy += 36;
             ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§c▸ Slay — CPS range"), px+10, fy, 0xaa4444);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("§7Min:"), px+10, fy+4, 0xAAAAAA);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("§7Max:"), px+pw-160, fy+4, 0xAAAAAA);
-            fy += 42;
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§7Mob Distance (blocks)"), px+10, fy, 0xAAAAAA);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("§7Min dist:"), px+10, fy+4, 0xAAAAAA);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("§7Max dist:"), px+pw-160, fy+4, 0xAAAAAA);
-            fy += 42;
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§7Backpack Alert (%):"), px+10, fy, 0xAAAAAA);
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§7Session Limit (min, 0=∞):"), px+pw-160, fy, 0xAAAAAA);
-            fy += 42;
+                Text.literal("§7Session Limit (min, 0=∞):"), px+10, fy, 0xAAAAAA);
+            fy += 36;
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§b▸ Snow Rows (default 32):"), px+10, fy, 0x0088aa);
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§b▸ Snow Row Width (blocks):"), px+pw-160, fy, 0x0088aa);
-            fy += 42;
+            fy += 36;
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§7Minecraft Username:"), px+10, fy, 0xAAAAAA);
-            fy += 42;
+            fy += 36;
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§7Discord Webhook URL:"), px+10, fy, 0xAAAAAA);
         }
@@ -1359,9 +1083,8 @@ public class FarmBotMod implements ClientModInitializer {
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§7$" + formatMoney(perMin) + "/min"), px+18, y+30, 0x44aa44);
             ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§7⚔ Kills: §f" + slayKills +
-                    "  §7🎣 Fish: §f" + fishCount +
-                    "  §7❄ Blocks: §f" + snowBlocksBroken),
+                Text.literal("§7❄ Snow: §f" + snowBlocksBroken +
+                    "  §7⚡ Hawk: §f" + hawkBlocksBroken),
                 px+18, y+42, 0xFFFFFF);
             ctx.drawTextWithShadow(textRenderer,
                 Text.literal("§7Before: §f$" + formatMoney(balanceBefore) +
@@ -1398,7 +1121,7 @@ public class FarmBotMod implements ClientModInitializer {
         }
 
         @Override
-        public void close() { client.setScreen(parent); }
+        public void close() { if (view == 1) saveConfig(); client.setScreen(parent); }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
