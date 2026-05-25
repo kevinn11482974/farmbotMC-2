@@ -384,16 +384,18 @@ public class FarmBotMod implements ClientModInitializer {
             }
         }
 
-        // Break mature crops in a 5-block window: 1 ahead + 3 behind in travel direction
+        // Break mature crops in 5-block window (1 ahead + 3 behind) at Y and Y+1
         if (client.world == null) return;
         BlockPos base = client.player.getBlockPos();
         int[] offsets = goingRight ? new int[]{1, -1, -2, -3} : new int[]{-1, 1, 2, 3};
         for (int ox : offsets) {
-            BlockPos pos = base.add(ox, 0, 0);
-            var bs = client.world.getBlockState(pos);
-            if (bs.getBlock() instanceof CropBlock cb && cb.isMature(bs)) {
-                client.interactionManager.attackBlock(pos, Direction.UP);
-                clickCount++;
+            for (int oy : new int[]{0, 1}) {
+                BlockPos pos = base.add(ox, oy, 0);
+                var bs = client.world.getBlockState(pos);
+                if (bs.getBlock() instanceof CropBlock cb && cb.isMature(bs)) {
+                    client.interactionManager.attackBlock(pos, Direction.UP);
+                    clickCount++;
+                }
             }
         }
     }
@@ -897,44 +899,55 @@ public class FarmBotMod implements ClientModInitializer {
         @Override
         protected void init() {
             int cx = width/2, cy = height/2;
-            int pw = 340, ph = 350;
+            int pw = 340, ph = 290;
             int px = cx-pw/2, py = cy-ph/2;
-
-            // Tabs
-            addDrawableChild(ButtonWidget.builder(Text.literal("Job"),
-                btn -> { view=0; clearAndInit(); }).dimensions(px, py+28, 114, 18).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Config"),
-                btn -> { view=1; clearAndInit(); }).dimensions(px+114, py+28, 112, 18).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Stats"),
-                btn -> { view=2; clearAndInit(); }).dimensions(px+226, py+28, 114, 18).build());
 
             if (view == 0) initJobView(px, py, pw, cx, cy);
             else if (view == 1) initConfigView(px, py, pw, cx, cy);
-
-            addDrawableChild(ButtonWidget.builder(Text.literal("Close"), btn -> close())
-                .dimensions(cx-40, py+ph-24, 80, 18).build());
         }
 
         protected void clearAndInit() { clearChildren(); init(); }
 
-        private void initJobView(int px, int py, int pw, int cx, int cy) {
-            // Row 1: Farm, Snow
-            addDrawableChild(ButtonWidget.builder(Text.literal("🌾  Farming"),
-                btn -> { currentMode = BotMode.FARM; clearAndInit(); })
-                .dimensions(px+10, py+80, 150, 26).build());
-            // Row 2: Hawk (centred)
-            addDrawableChild(ButtonWidget.builder(Text.literal("❄️  Snowing"),
-                btn -> { currentMode = BotMode.SNOW; clearAndInit(); })
-                .dimensions(px+pw-160, py+80, 150, 26).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("⚡  HawkMode"),
-                btn -> { currentMode = BotMode.HAWKJIGARFARMMEGAFASTVIPPRO; clearAndInit(); })
-                .dimensions(cx-75, py+112, 150, 26).build());
+        @Override
+        public boolean mouseClicked(double mx, double my, int btn) {
+            if (btn != 0) return super.mouseClicked(mx, my, btn);
+            int cx = width/2, cy = height/2;
+            int pw = 340, ph = 290;
+            int px = cx-pw/2, py = cy-ph/2;
+            // Tabs
+            if (hit(mx, my, px,       py+26, 114, 20)) { view=0; clearAndInit(); return true; }
+            if (hit(mx, my, px+114,   py+26, 113, 20)) { view=1; clearAndInit(); return true; }
+            if (hit(mx, my, px+227,   py+26, 113, 20)) { view=2; clearAndInit(); return true; }
+            if (view == 0) {
+                if (hit(mx, my, px+8,       py+52, 155, 60)) { currentMode = BotMode.FARM; clearAndInit(); return true; }
+                if (hit(mx, my, px+pw-163,  py+52, 155, 60)) { currentMode = BotMode.SNOW; clearAndInit(); return true; }
+                if (hit(mx, my, px+8,       py+120, pw-16, 44)) { currentMode = BotMode.HAWKJIGARFARMMEGAFASTVIPPRO; clearAndInit(); return true; }
+            }
+            return super.mouseClicked(mx, my, btn);
+        }
 
-            // Start/Stop
+        private boolean hit(double mx, double my, int x, int y, int w, int h) {
+            return mx >= x && mx < x+w && my >= y && my < y+h;
+        }
+
+        private void drawCard(DrawContext ctx, int x, int y, int w, int h,
+                              String title, String sub, boolean selected, boolean hovered, int accent) {
+            ctx.fill(x, y, x+w, y+h, 0xFF0d0d1c);
+            if (hovered && !selected) ctx.fill(x, y, x+w, y+h, 0x18ffffff);
+            if (selected) {
+                ctx.fill(x, y, x+3, y+h, accent);
+                ctx.fill(x, y, x+w, y+2, accent);
+            }
+            ctx.drawBorder(x, y, w, h, selected ? accent : 0xFF252538);
+            ctx.drawText(textRenderer, Text.literal(title), x+10, y+10, selected ? accent : 0xFFcccccc, true);
+            ctx.drawText(textRenderer, Text.literal(sub), x+10, y+24, 0xFFFFFF, false);
+        }
+
+        private void initJobView(int px, int py, int pw, int cx, int cy) {
             boolean canStart = currentMode != BotMode.NONE;
             addDrawableChild(ButtonWidget.builder(
-                Text.literal(botActive ? "⏹  Stop  [H]" :
-                    canStart ? "▶  Start  [H]" : "— Select a job first —"),
+                Text.literal(botActive ? "■  Stop  [H]" :
+                    canStart ? "▶  Start  [H]" : "Select a job first"),
                 btn -> {
                     if (!canStart) return;
                     MinecraftClient c = MinecraftClient.getInstance();
@@ -944,11 +957,13 @@ public class FarmBotMod implements ClientModInitializer {
                     if (botActive) mod.startBot(c);
                     else mod.stopBot(c);
                     clearAndInit();
-                }).dimensions(cx-80, py+152, 160, 24).build());
+                }).dimensions(cx-75, py+218, 150, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("✕ Close"), btn -> close())
+                .dimensions(px+pw-60, py+218, 58, 20).build());
         }
 
         private void initConfigView(int px, int py, int pw, int cx, int cy) {
-            int fy = py+68;
+            int fy = py+50;
 
             // Farm
             clickMinF = addField(px+10, fy+12, 150, String.valueOf(clickSpeedMin));
@@ -1006,98 +1021,100 @@ public class FarmBotMod implements ClientModInitializer {
         @Override
         public void render(DrawContext ctx, int mx, int my, float delta) {
             int cx = width/2, cy = height/2;
-            int pw = 340, ph = 350;
+            int pw = 340, ph = 290;
             int px = cx-pw/2, py = cy-ph/2;
             int accent = currentMode==BotMode.FARM ? 0xFF00ff88 :
                          currentMode==BotMode.SNOW ? 0xFF00ccff :
-                         currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? 0xFFffaa00 : 0xFF6666dd;
-            int border = currentMode==BotMode.FARM ? 0xFF00ff44 :
-                         currentMode==BotMode.SNOW ? 0xFF0088aa :
-                         currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? 0xFFaa6600 : 0xFF444488;
+                         currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? 0xFFffaa00 : 0xFF5566ff;
 
-            ctx.fill(px, py, px+pw, py+ph, 0xEE0a0a1a);
+            // Panel
+            ctx.fill(px, py, px+pw, py+ph, 0xF2080812);
             ctx.fill(px, py, px+pw, py+3, accent);
-            ctx.drawBorder(px, py, pw, ph, border);
-            ctx.drawCenteredTextWithShadow(textRenderer,
-                Text.literal("§fBotMaster"), cx, py+10, 0xFFFFFF);
+            ctx.drawBorder(px, py, pw, ph, 0xFF252538);
 
-            // Tab underline
-            int[] tx = {px, px+114, px+226};
-            int[] tw = {114, 112, 114};
-            ctx.fill(tx[view], py+46, tx[view]+tw[view], py+48, accent);
+            // Title row
+            ctx.drawText(textRenderer, Text.literal("§fBotMaster"), px+10, py+7, accent, true);
+            String runTag = botActive ? "§a● ON" : "§c● OFF";
+            ctx.drawText(textRenderer, Text.literal(runTag), px+pw-40, py+7, 0xFFFFFF, false);
 
-            if (view == 0) renderJobView(ctx, px, py, pw, cx);
+            // Tab strip background
+            ctx.fill(px, py+22, px+pw, py+46, 0xFF0a0a18);
+            ctx.fill(px, py+44, px+pw, py+46, 0xFF1a1a2f);
+
+            // Tab labels (custom, no ButtonWidget)
+            String[] tabNames = {"  Job  ", " Config", " Stats "};
+            int[] tabX = {px, px+114, px+227};
+            int[] tabW = {114, 113, 113};
+            for (int i = 0; i < 3; i++) {
+                boolean active = view == i;
+                boolean hov = hit(mx, my, tabX[i], py+26, tabW[i], 18);
+                if (active) ctx.fill(tabX[i], py+26, tabX[i]+tabW[i], py+44, 0xFF131325);
+                else if (hov) ctx.fill(tabX[i], py+26, tabX[i]+tabW[i], py+44, 0xFF0f0f20);
+                if (active) ctx.fill(tabX[i], py+44, tabX[i]+tabW[i], py+46, accent);
+                int tc = active ? 0xFFffffff : hov ? 0xFF9999bb : 0xFF555577;
+                ctx.drawCenteredTextWithShadow(textRenderer, Text.literal(tabNames[i]),
+                    tabX[i]+tabW[i]/2, py+31, tc);
+            }
+
+            if (view == 0) renderJobView(ctx, px, py, pw, cx, mx, my);
             else if (view == 1) renderConfigView(ctx, px, py, pw, cx);
             else renderStatsView(ctx, px, py, pw, cx);
 
             super.render(ctx, mx, my, delta);
         }
 
-        private void renderJobView(DrawContext ctx, int px, int py, int pw, int cx) {
-            ctx.drawCenteredTextWithShadow(textRenderer,
-                Text.literal("§7Select a job"), cx, py+68, 0x888888);
+        private void renderJobView(DrawContext ctx, int px, int py, int pw, int cx, int mx, int my) {
+            // Job cards
+            drawCard(ctx, px+8, py+52, 155, 60,
+                "§aFarming", "§8harvest crops + 5-block scan",
+                currentMode==BotMode.FARM, hit(mx,my,px+8,py+52,155,60), 0xFF00ff88);
+            drawCard(ctx, px+pw-163, py+52, 155, 60,
+                "§bSnowing", "§8break snow + /fix all",
+                currentMode==BotMode.SNOW, hit(mx,my,px+pw-163,py+52,155,60), 0xFF00ccff);
+            drawCard(ctx, px+8, py+120, pw-16, 44,
+                "§6⚡ HawkMode", "§8nether wart radius-3 sphere harvest",
+                currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO, hit(mx,my,px+8,py+120,pw-16,44), 0xFFffaa00);
 
-            // Row 1 card highlights
-            if (currentMode==BotMode.FARM)
-                ctx.fill(px+8, py+78, px+162, py+108, 0xFF0a1a0a);
-            // Row 2 card highlights
-            if (currentMode==BotMode.SNOW)
-                ctx.fill(px+pw-162, py+78, px+pw-8, py+108, 0xFF001a22);
+            // Divider
+            ctx.fill(px+8, py+172, px+pw-8, py+173, 0xFF1e1e30);
 
-            if (currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO)
-                ctx.fill(px+8, py+110, px+pw-8, py+140, 0xFF221100);
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§8harvest crops"), px+20, py+109, 0xFFFFFF);
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§8break snow"), px+pw-145, py+109, 0xFFFFFF);
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§8nether wart 9x9x9"), cx-50, py+141, 0xFFFFFF);
-
-            ctx.fill(px+4, py+155, px+pw-4, py+156, 0xFF333355);
-
-            String jobStr = currentMode==BotMode.NONE ? "§8None selected" :
-                            currentMode==BotMode.FARM ? "§a🌾 Farming" :
-                            currentMode==BotMode.SNOW ? "§b❄️ Snowing" :
-                            currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? "§6⚡ HawkMode" : "§8None selected";
-            ctx.drawCenteredTextWithShadow(textRenderer,
-                Text.literal("§7Job: " + jobStr), cx, py+160, 0xFFFFFF);
-            ctx.drawCenteredTextWithShadow(textRenderer,
-                Text.literal("§7Status: " + (botActive ? "§a● Running" : "§c● Stopped")),
-                cx, py+172, 0xFFFFFF);
+            // Status rows
+            String modeStr = currentMode==BotMode.NONE ? "§8none" :
+                             currentMode==BotMode.FARM ? "§aFarming" :
+                             currentMode==BotMode.SNOW ? "§bSnowing" : "§6HawkMode";
+            ctx.drawText(textRenderer, Text.literal("§7Mode  §8» §f" + modeStr.substring(2)),
+                px+12, py+177, 0xFFFFFF, false);
+            ctx.drawText(textRenderer, Text.literal(
+                "§7Status §8» " + (botActive ? "§a● running" : "§c● stopped")),
+                px+12, py+189, 0xFFFFFF, false);
             if (botActive) {
                 long el = (System.currentTimeMillis() - startTime) / 1000;
-                ctx.drawCenteredTextWithShadow(textRenderer,
-                    Text.literal("§7Session: §f" + formatTime(el)), cx, py+184, 0xFFFFFF);
+                ctx.drawText(textRenderer, Text.literal("§7Session §8» §f" + formatTime(el)),
+                    px+12, py+201, 0xFFFFFF, false);
             }
         }
 
         private void renderConfigView(DrawContext ctx, int px, int py, int pw, int cx) {
-            int fy = py+68;
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§a▸ Farm — Click Speed (sec)"), px+10, fy, 0x44aa44);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("§7Min:"), px+10, fy+4, 0xAAAAAA);
-            ctx.drawTextWithShadow(textRenderer, Text.literal("§7Max:"), px+pw-160, fy+4, 0xAAAAAA);
+            int fy = py+50;
+            ctx.drawText(textRenderer, Text.literal("§7Farm click speed §8(sec)"), px+10, fy, 0x44aa44, false);
+            ctx.drawText(textRenderer, Text.literal("§8min"), px+10, fy+18, 0xAAAAAA, false);
+            ctx.drawText(textRenderer, Text.literal("§8max"), px+pw-160, fy+18, 0xAAAAAA, false);
             fy += 36;
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§7Session Limit (min, 0=∞):"), px+10, fy, 0xAAAAAA);
+            ctx.drawText(textRenderer, Text.literal("§7Session limit §8(min, 0=∞)"), px+10, fy, 0xAAAAAA, false);
             fy += 36;
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§b▸ Snow Rows (default 32):"), px+10, fy, 0x0088aa);
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§b▸ Snow Row Width (blocks):"), px+pw-160, fy, 0x0088aa);
+            ctx.drawText(textRenderer, Text.literal("§7Snow rows"), px+10, fy, 0x0088aa, false);
+            ctx.drawText(textRenderer, Text.literal("§7Snow row width"), px+pw-160, fy, 0x0088aa, false);
             fy += 36;
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§7Minecraft Username:"), px+10, fy, 0xAAAAAA);
+            ctx.drawText(textRenderer, Text.literal("§7Minecraft username"), px+10, fy, 0xAAAAAA, false);
             fy += 36;
-            ctx.drawTextWithShadow(textRenderer,
-                Text.literal("§7Discord Webhook URL:"), px+10, fy, 0xAAAAAA);
+            ctx.drawText(textRenderer, Text.literal("§7Discord webhook URL"), px+10, fy, 0xAAAAAA, false);
         }
 
         private void renderStatsView(DrawContext ctx, int px, int py, int pw, int cx) {
             long profit = balanceAfter > 0 ? balanceAfter - balanceBefore : 0;
             long elapsed = (System.currentTimeMillis() - startTime) / 1000;
             long perMin = elapsed > 0 ? (profit * 60) / elapsed : 0;
-            int y = py+60;
+            int y = py+50;
 
             // Profit card
             ctx.fill(px+10, y, px+pw-10, y+52, 0xFF0a1a0a);
