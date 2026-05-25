@@ -14,6 +14,7 @@ import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.CropBlock;
 import net.minecraft.block.NetherWartBlock;
 import net.minecraft.item.ShovelItem;
 import net.minecraft.text.Text;
@@ -382,6 +383,19 @@ public class FarmBotMod implements ClientModInitializer {
                 clickCount++;
             }
         }
+
+        // Break mature crops in a 5-block window: 1 ahead + 3 behind in travel direction
+        if (client.world == null) return;
+        BlockPos base = client.player.getBlockPos();
+        int[] offsets = goingRight ? new int[]{1, -1, -2, -3} : new int[]{-1, 1, 2, 3};
+        for (int ox : offsets) {
+            BlockPos pos = base.add(ox, 0, 0);
+            var bs = client.world.getBlockState(pos);
+            if (bs.getBlock() instanceof CropBlock cb && cb.isMature(bs)) {
+                client.interactionManager.attackBlock(pos, Direction.UP);
+                clickCount++;
+            }
+        }
     }
 
     // ── Snow tick ─────────────────────────────────────────────────────────────
@@ -507,11 +521,12 @@ public class FarmBotMod implements ClientModInitializer {
     private void tickHawk(MinecraftClient client) {
         if (client.world == null) return;
 
-        // Scan 9x9x9 cube and break fully grown nether wart directly
+        // Scan radius-3 sphere and break fully grown nether wart directly
         BlockPos origin = client.player.getBlockPos();
-        for (int dx = -4; dx <= 4; dx++) {
-            for (int dy = -4; dy <= 4; dy++) {
-                for (int dz = -4; dz <= 4; dz++) {
+        for (int dx = -3; dx <= 3; dx++) {
+            for (int dy = -3; dy <= 3; dy++) {
+                for (int dz = -3; dz <= 3; dz++) {
+                    if (dx*dx + dy*dy + dz*dz > 9) continue;
                     BlockPos checkPos = origin.add(dx, dy, dz);
                     var bs = client.world.getBlockState(checkPos);
                     if (bs.getBlock() == Blocks.NETHER_WART &&
