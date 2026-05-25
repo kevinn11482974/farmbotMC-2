@@ -766,7 +766,7 @@ public class FarmBotMod implements ClientModInitializer {
         int accent = isFarm ? 0xFF00ff88 : isSnow ? 0xFF00ccff : isHawk ? 0xFFffaa00 : 0xFF6666dd;
         int border = isFarm ? 0xFF00ff44 : isSnow ? 0xFF0088aa : isHawk ? 0xFFaa6600 : 0xFF444488;
 
-        ctx.fill(x, y, x+w, y+h, 0xCC0a0a1a);
+        ctx.fill(x, y, x+w, y+h, 0xFF0a0a1a);
         ctx.fill(x, y, x+w, y+2, accent);
         ctx.drawBorder(x, y, w, h, border);
 
@@ -933,7 +933,7 @@ public class FarmBotMod implements ClientModInitializer {
         private void drawCard(DrawContext ctx, int x, int y, int w, int h,
                               String title, String sub, boolean selected, boolean hovered, int accent) {
             ctx.fill(x, y, x+w, y+h, 0xFF0d0d1c);
-            if (hovered && !selected) ctx.fill(x, y, x+w, y+h, 0x18ffffff);
+            if (hovered && !selected) ctx.fill(x, y, x+w, y+h, 0x25ffffff);
             if (selected) {
                 ctx.fill(x, y, x+3, y+h, accent);
                 ctx.fill(x, y, x+w, y+2, accent);
@@ -1027,8 +1027,9 @@ public class FarmBotMod implements ClientModInitializer {
                          currentMode==BotMode.SNOW ? 0xFF00ccff :
                          currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? 0xFFffaa00 : 0xFF5566ff;
 
-            // Panel
-            ctx.fill(px, py, px+pw, py+ph, 0xF2080812);
+            // Full-screen overlay + panel
+            ctx.fillGradient(0, 0, this.width, this.height, 0xC0101010, 0xD0000000);
+            ctx.fill(px, py, px+pw, py+ph, 0xFF080812);
             ctx.fill(px, py, px+pw, py+3, accent);
             ctx.drawBorder(px, py, pw, ph, 0xFF252538);
 
