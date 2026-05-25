@@ -398,6 +398,20 @@ public class FarmBotMod implements ClientModInitializer {
                 }
             }
         }
+
+        // 3x3x3 cube scan — break any mature crop in range
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos pos = base.add(dx, dy, dz);
+                    var bs = client.world.getBlockState(pos);
+                    if (bs.getBlock() instanceof CropBlock cb && cb.isMature(bs)) {
+                        client.interactionManager.attackBlock(pos, Direction.UP);
+                        clickCount++;
+                    }
+                }
+            }
+        }
     }
 
     // ── Snow tick ─────────────────────────────────────────────────────────────
