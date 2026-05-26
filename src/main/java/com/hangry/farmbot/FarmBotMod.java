@@ -23,6 +23,8 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.block.BlockState;
+import net.minecraft.registry.tag.BlockTags;
 import org.lwjgl.glfw.GLFW;
 
 import java.net.URI;
@@ -40,7 +42,7 @@ import java.util.regex.Pattern;
 public class FarmBotMod implements ClientModInitializer {
 
     // ── Mode ──────────────────────────────────────────────────────────────────
-    public enum BotMode { NONE, FARM, SNOW, HAWKJIGARFARMMEGAFASTVIPPRO }
+    public enum BotMode { NONE, FARM, SNOW, HAWKJIGARFARMMEGAFASTVIPPRO, MINE }
     public static BotMode currentMode = BotMode.NONE;
     public static boolean botActive = false;
     public static boolean showGui = true;
@@ -99,6 +101,13 @@ public class FarmBotMod implements ClientModInitializer {
     private static int hawkBlocksBroken = 0;
     private static double hawkLastX = 0;
     private static double hawkLastZ = 0;
+
+    // ── Mine state ────────────────────────────────────────────────────────────
+    public enum MineState { MINING, BREAKING_ORE }
+    private static MineState mineState = MineState.MINING;
+    private static int mineOreBroken = 0;
+    private static double mineStartY = 0;
+    private static final java.util.ArrayDeque<BlockPos> mineOreQueue = new java.util.ArrayDeque<>();
 
     // ── Activity solver state ─────────────────────────────────────────────────
     private static boolean activitySolverActive = false;
@@ -303,6 +312,7 @@ public class FarmBotMod implements ClientModInitializer {
         if      (currentMode == BotMode.FARM) tickFarm(client);
         else if (currentMode == BotMode.SNOW) tickSnow(client);
         else if (currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO) tickHawk(client);
+        else if (currentMode == BotMode.MINE) tickMine(client);
     }
 
     // ── Farm tick ─────────────────────────────────────────────────────────────
@@ -585,6 +595,88 @@ public class FarmBotMod implements ClientModInitializer {
         hawkLastZ = cz;
     }
 
+    // ── Mine tick ─────────────────────────────────────────────────────────────
+    private void tickMine(MinecraftClient client) {
+        if (client.world == null) return;
+        var player = client.player;
+        BlockPos pPos = player.getBlockPos();
+
+        // Count nearby air to pick scan radius
+        int airCount = 0;
+        for (int dx = -3; dx <= 3; dx++)
+            for (int dy = -3; dy <= 3; dy++)
+                for (int dz = -3; dz <= 3; dz++)
+                    if (client.world.getBlockState(pPos.add(dx, dy, dz)).isAir()) airCount++;
+        int scanRadius = airCount < 20 ? 2 : 4;
+
+        // Y-drop recovery
+        if (player.getY() < mineStartY - 3) {
+            player.networkHandler.sendCommand("fly");
+            pressKey(GLFW.GLFW_KEY_SPACE, true);
+            return;
+        }
+        pressKey(GLFW.GLFW_KEY_SPACE, false);
+
+        switch (mineState) {
+            case MINING -> {
+                mineOreQueue.clear();
+                for (int dx = -scanRadius; dx <= scanRadius; dx++)
+                    for (int dy = -scanRadius; dy <= scanRadius; dy++)
+                        for (int dz = -scanRadius; dz <= scanRadius; dz++) {
+                            BlockPos p = pPos.add(dx, dy, dz);
+                            var bs = client.world.getBlockState(p);
+                            if (isOre(bs) && isExposed(client, p)) mineOreQueue.add(p);
+                        }
+                if (!mineOreQueue.isEmpty()) {
+                    player.getInventory().selectedSlot = 1;
+                    mineState = MineState.BREAKING_ORE;
+                } else {
+                    player.getInventory().selectedSlot = 0;
+                    pressKey(GLFW.GLFW_KEY_W, true);
+                    if (client.crosshairTarget != null &&
+                            client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
+                        BlockHitResult bhr = (BlockHitResult) client.crosshairTarget;
+                        client.interactionManager.attackBlock(bhr.getBlockPos(), bhr.getSide());
+                        player.swingHand(Hand.MAIN_HAND);
+                        clickCount++;
+                    }
+                }
+            }
+            case BREAKING_ORE -> {
+                pressKey(GLFW.GLFW_KEY_W, false);
+                if (mineOreQueue.isEmpty()) {
+                    player.getInventory().selectedSlot = 0;
+                    mineState = MineState.MINING;
+                    return;
+                }
+                BlockPos orePos = mineOreQueue.poll();
+                if (isOre(client.world.getBlockState(orePos))) {
+                    client.interactionManager.attackBlock(orePos, Direction.UP);
+                    player.swingHand(Hand.MAIN_HAND);
+                    mineOreBroken++;
+                    clickCount++;
+                }
+                if (mineOreQueue.isEmpty()) {
+                    player.getInventory().selectedSlot = 0;
+                    mineState = MineState.MINING;
+                }
+            }
+        }
+    }
+
+    private boolean isOre(BlockState bs) {
+        return bs.isIn(BlockTags.COAL_ORES) || bs.isIn(BlockTags.IRON_ORES) ||
+               bs.isIn(BlockTags.GOLD_ORES) || bs.isIn(BlockTags.DIAMOND_ORES) ||
+               bs.isIn(BlockTags.REDSTONE_ORES) || bs.isIn(BlockTags.LAPIS_ORES) ||
+               bs.isIn(BlockTags.COPPER_ORES) || bs.isIn(BlockTags.EMERALD_ORES);
+    }
+
+    private boolean isExposed(MinecraftClient client, BlockPos pos) {
+        for (Direction d : Direction.values())
+            if (client.world.getBlockState(pos.offset(d)).isAir()) return true;
+        return false;
+    }
+
     // ── Activity solver ───────────────────────────────────────────────────────
     private void tickActivitySolver(MinecraftClient client) {
         if (!activitySolverActive || client.player == null) return;
@@ -697,11 +789,18 @@ public class FarmBotMod implements ClientModInitializer {
             hawkBlocksBroken = 0; hawkGoingRight = true;
             hawkStuckTicks = 0; hawkFlipGrace = 0;
             hawkLastX = client.player.getX(); hawkLastZ = client.player.getZ();
+        } else if (currentMode == BotMode.MINE) {
+            mineState = MineState.MINING;
+            mineOreBroken = 0;
+            mineStartY = client.player.getY();
+            mineOreQueue.clear();
+            client.player.getInventory().selectedSlot = 0;
         }
 
         String emoji = currentMode == BotMode.FARM ? "🌾"
                      : currentMode == BotMode.SNOW ? "❄️"
-                     : currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? "⚡" : "🌱";
+                     : currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? "⚡"
+                     : currentMode == BotMode.MINE ? "⛏" : "🌱";
         client.player.sendMessage(
             Text.literal("§a[BotMaster] " + emoji + " " + currentMode.name() +
                 " started! §7H§f=stop §7J§f=menu"), true);
@@ -713,6 +812,8 @@ public class FarmBotMod implements ClientModInitializer {
                 ? "❄️ Rows: **" + snowRows + "** | Width: **" + snowRowWidth + "**"
                 : currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO
                 ? "⚡ Nether wart 9x9x9 harvest"
+                : currentMode == BotMode.MINE
+                ? "⛏ Ore mining r=4 scan"
                 : "";
             sendWebhook(
                 emoji + " **BotMaster Started — " + currentMode.name() + "**\n" +
@@ -746,7 +847,7 @@ public class FarmBotMod implements ClientModInitializer {
         if (notifySessionEnd && !webhookUrl.isEmpty()) {
             String emoji = currentMode == BotMode.FARM ? "🌾"
                          : currentMode == BotMode.SNOW ? "❄️"
-                         : "🌱";
+                         : currentMode == BotMode.MINE ? "⛏" : "🌱";
             String extra = currentMode == BotMode.FARM
                 ? "🌾 Rows: **" + rowCount + "** | Clicks: **" + clickCount + "**\n"
                 : currentMode == BotMode.SNOW
@@ -775,10 +876,11 @@ public class FarmBotMod implements ClientModInitializer {
         boolean isFarm = currentMode == BotMode.FARM;
         boolean isSnow = currentMode == BotMode.SNOW;
         boolean isHawk = currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO;
+        boolean isMine = currentMode == BotMode.MINE;
         int x = 10, y = 10, w = 260;
-        int h = !botActive ? 52 : isSnow ? 160 : isHawk ? 150 : 190;
-        int accent = isFarm ? 0xFF00ff88 : isSnow ? 0xFF00ccff : isHawk ? 0xFFffaa00 : 0xFF6666dd;
-        int border = isFarm ? 0xFF00ff44 : isSnow ? 0xFF0088aa : isHawk ? 0xFFaa6600 : 0xFF444488;
+        int h = !botActive ? 52 : isSnow ? 160 : isHawk ? 150 : isMine ? 160 : 190;
+        int accent = isFarm ? 0xFF00ff88 : isSnow ? 0xFF00ccff : isHawk ? 0xFFffaa00 : isMine ? 0xFF888888 : 0xFF6666dd;
+        int border = isFarm ? 0xFF00ff44 : isSnow ? 0xFF0088aa : isHawk ? 0xFFaa6600 : isMine ? 0xFF555555 : 0xFF444488;
 
         ctx.fill(x, y, x+w, y+h, 0xFF0a0a1a);
         ctx.fill(x, y, x+w, y+2, accent);
@@ -787,7 +889,7 @@ public class FarmBotMod implements ClientModInitializer {
         // Title bar
         String modeTag = currentMode == BotMode.NONE ? "§7No job" :
                          isFarm ? "§a🌾 Farm" : isSnow ? "§b❄ Snow" :
-                         isHawk ? "§6⚡ HAWK" : "§7Unknown";
+                         isHawk ? "§6⚡ HAWK" : isMine ? "§7⛏ Mine" : "§7Unknown";
         ctx.drawText(client.textRenderer,
             Text.literal("§fBotMaster §8| " + modeTag + " §8| §eJ§f=menu §eH§f=toggle §eG§f=hud"),
             x+6, y+6, 0xFFFFFF, false);
@@ -895,6 +997,28 @@ public class FarmBotMod implements ClientModInitializer {
                 Text.literal("§7Checks: §e" + activityCheckCount +
                     "  §7Webhook: " + (webhookUrl.isEmpty() ? "§cNot set" : "§aSet ✔")),
                 x+6, y+88, 0xFFFFFF, false);
+        } else if (isMine) {
+            long secs = Math.max(1, elapsed);
+            long bpm = (mineOreBroken * 60L) / secs;
+            String pickaxe = mineState == MineState.MINING ? "Zenith (slot 1)" : "Ghost (slot 2)";
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7State: §f" + mineState.name()),
+                x+6, y+41, 0xFFFFFF, false);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Ores: §f" + mineOreBroken + " broken  §7(§e" + bpm + "/min§7)"),
+                x+6, y+51, 0xFFFFFF, false);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Pick: §f" + pickaxe),
+                x+6, y+61, 0xFFFFFF, false);
+            ctx.fill(x+4, y+73, x+w-4, y+74, 0xFF333333);
+            ctx.drawText(client.textRenderer,
+                Text.literal(String.format("§7X:§f%.0f §7Z:§f%.0f §7Y:§f%.0f",
+                    client.player.getX(), client.player.getZ(), client.player.getY())),
+                x+6, y+77, 0xFFFFFF, false);
+            ctx.drawText(client.textRenderer,
+                Text.literal("§7Checks: §e" + activityCheckCount +
+                    "  §7Webhook: " + (webhookUrl.isEmpty() ? "§cNot set" : "§aSet ✔")),
+                x+6, y+88, 0xFFFFFF, false);
         }
     }
 
@@ -913,7 +1037,7 @@ public class FarmBotMod implements ClientModInitializer {
         @Override
         protected void init() {
             int cx = width/2, cy = height/2;
-            int pw = 340, ph = 290;
+            int pw = 340, ph = 320;
             int px = cx-pw/2, py = cy-ph/2;
 
             if (view == 0) initJobView(px, py, pw, cx, cy);
@@ -926,7 +1050,7 @@ public class FarmBotMod implements ClientModInitializer {
         public boolean mouseClicked(double mx, double my, int btn) {
             if (btn != 0) return super.mouseClicked(mx, my, btn);
             int cx = width/2, cy = height/2;
-            int pw = 340, ph = 290;
+            int pw = 340, ph = 320;
             int px = cx-pw/2, py = cy-ph/2;
             // Tabs
             if (hit(mx, my, px,       py+26, 114, 20)) { view=0; clearAndInit(); return true; }
@@ -936,6 +1060,7 @@ public class FarmBotMod implements ClientModInitializer {
                 if (hit(mx, my, px+8,       py+52, 155, 60)) { currentMode = BotMode.FARM; clearAndInit(); return true; }
                 if (hit(mx, my, px+pw-163,  py+52, 155, 60)) { currentMode = BotMode.SNOW; clearAndInit(); return true; }
                 if (hit(mx, my, px+8,       py+120, pw-16, 44)) { currentMode = BotMode.HAWKJIGARFARMMEGAFASTVIPPRO; clearAndInit(); return true; }
+                if (hit(mx, my, px+8,       py+172, pw-16, 44)) { currentMode = BotMode.MINE; clearAndInit(); return true; }
             }
             return super.mouseClicked(mx, my, btn);
         }
@@ -971,9 +1096,9 @@ public class FarmBotMod implements ClientModInitializer {
                     if (botActive) mod.startBot(c);
                     else mod.stopBot(c);
                     clearAndInit();
-                }).dimensions(cx-75, py+218, 150, 20).build());
+                }).dimensions(cx-75, py+268, 150, 20).build());
             addDrawableChild(ButtonWidget.builder(Text.literal("✕ Close"), btn -> close())
-                .dimensions(px+pw-60, py+218, 58, 20).build());
+                .dimensions(px+pw-60, py+268, 58, 20).build());
         }
 
         private void initConfigView(int px, int py, int pw, int cx, int cy) {
@@ -1035,11 +1160,12 @@ public class FarmBotMod implements ClientModInitializer {
         @Override
         public void render(DrawContext ctx, int mx, int my, float delta) {
             int cx = width/2, cy = height/2;
-            int pw = 340, ph = 290;
+            int pw = 340, ph = 320;
             int px = cx-pw/2, py = cy-ph/2;
             int accent = currentMode==BotMode.FARM ? 0xFF00ff88 :
                          currentMode==BotMode.SNOW ? 0xFF00ccff :
-                         currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? 0xFFffaa00 : 0xFF5566ff;
+                         currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? 0xFFffaa00 :
+                         currentMode==BotMode.MINE ? 0xFF888888 : 0xFF5566ff;
 
             // Full-screen overlay + panel
             ctx.fillGradient(0, 0, this.width, this.height, 0xC0101010, 0xD0000000);
@@ -1089,23 +1215,27 @@ public class FarmBotMod implements ClientModInitializer {
             drawCard(ctx, px+8, py+120, pw-16, 44,
                 "§6⚡ HawkMode", "§8nether wart radius-3 sphere harvest",
                 currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO, hit(mx,my,px+8,py+120,pw-16,44), 0xFFffaa00);
+            drawCard(ctx, px+8, py+172, pw-16, 44,
+                "§7⛏ Mining", "§8ore scan r=4 + slot switch",
+                currentMode==BotMode.MINE, hit(mx,my,px+8,py+172,pw-16,44), 0xFF888888);
 
             // Divider
-            ctx.fill(px+8, py+172, px+pw-8, py+173, 0xFF1e1e30);
+            ctx.fill(px+8, py+224, px+pw-8, py+225, 0xFF1e1e30);
 
             // Status rows
             String modeStr = currentMode==BotMode.NONE ? "§8none" :
                              currentMode==BotMode.FARM ? "§aFarming" :
-                             currentMode==BotMode.SNOW ? "§bSnowing" : "§6HawkMode";
+                             currentMode==BotMode.SNOW ? "§bSnowing" :
+                             currentMode==BotMode.HAWKJIGARFARMMEGAFASTVIPPRO ? "§6HawkMode" : "§7Mining";
             ctx.drawText(textRenderer, Text.literal("§7Mode  §8» §f" + modeStr.substring(2)),
-                px+12, py+177, 0xFFFFFF, false);
+                px+12, py+229, 0xFFFFFF, false);
             ctx.drawText(textRenderer, Text.literal(
                 "§7Status §8» " + (botActive ? "§a● running" : "§c● stopped")),
-                px+12, py+189, 0xFFFFFF, false);
+                px+12, py+241, 0xFFFFFF, false);
             if (botActive) {
                 long el = (System.currentTimeMillis() - startTime) / 1000;
                 ctx.drawText(textRenderer, Text.literal("§7Session §8» §f" + formatTime(el)),
-                    px+12, py+201, 0xFFFFFF, false);
+                    px+12, py+253, 0xFFFFFF, false);
             }
         }
 
