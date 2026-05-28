@@ -61,6 +61,9 @@ public class FarmBotMod implements ClientModInitializer {
     public static int snowRows = 32;
     public static int snowRowWidth = 4;
 
+    // ── Global /fix all timer (all modes, every 5 min) ────────────────────────
+    private static int fixAllTimer = 6000;
+
     // ── Farm state ────────────────────────────────────────────────────────────
     private static boolean goingRight = true;
     private static int clickTickTimer = 0;
@@ -92,7 +95,6 @@ public class FarmBotMod implements ClientModInitializer {
     private static int snowClickTimer = 0;
     private static int snowCurrentClickEvery = 1;
     private static int snowTeleportDelay = 0;
-    private static int snowFixTimer = 6000;
 
     // ── Hawk state ────────────────────────────────────────────────────────────
     private static boolean hawkGoingRight = true;
@@ -310,6 +312,12 @@ public class FarmBotMod implements ClientModInitializer {
         tickActivitySolver(client);
         if (!botActive) return;
 
+        // /fix all every 5 minutes (all modes)
+        if (--fixAllTimer <= 0) {
+            client.player.networkHandler.sendCommand("fix all");
+            fixAllTimer = 6000;
+        }
+
         // Route to mode
         if      (currentMode == BotMode.FARM) tickFarm(client);
         else if (currentMode == BotMode.SNOW) tickSnow(client);
@@ -434,12 +442,6 @@ public class FarmBotMod implements ClientModInitializer {
             return;
         }
         if (client.world == null) return;
-
-        // /fix all every 5 minutes
-        if (--snowFixTimer <= 0) {
-            client.player.networkHandler.sendCommand("fix all");
-            snowFixTimer = 6000;
-        }
 
         switch (snowState) {
             case CLEARING -> {
@@ -776,6 +778,7 @@ public class FarmBotMod implements ClientModInitializer {
         clickCount = 0;
         activityCheckCount = 0;
         wasHandledScreenOpen = false;
+        fixAllTimer = 6000;
 
         waitingForBalBefore = true;
         balCheckDelay = 20;
@@ -793,7 +796,6 @@ public class FarmBotMod implements ClientModInitializer {
             snowState = SnowState.CLEARING; snowGoingRight = true;
             snowSteppingForward = false; snowStuckTicks = 0;
             snowTeleportDelay = 0; snowClickTimer = 0; snowCurrentClickEvery = 1;
-            snowFixTimer = 6000;
             snowLastX = client.player.getX(); snowLastZ = client.player.getZ();
         } else if (currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO) {
             hawkBlocksBroken = 0; hawkGoingRight = true;
