@@ -404,32 +404,32 @@ public class FarmBotMod implements ClientModInitializer {
             }
         }
 
-        // Break mature crops in 5-block window (1 ahead + 3 behind) at Y and Y+1
+        // Extended reach — custom grid + 3x3 flat scan at Y and Y+1, capped at 8 breaks/tick
         if (client.world == null) return;
+        int[][] offsets = {
+            // Custom far-grid offsets
+            {-3,0,-2},{-2,0,-2},{2,0,-2},{3,0,-2},
+            {-3,0,-1},{-2,0,-1},{2,0,-1},{3,0,-1},
+            {-3,0, 0},{-2,0, 0},{-1,0, 0},{1,0, 0},{2,0, 0},{3,0, 0},
+            // 3x3 flat at Y
+            {-1,0,-1},{0,0,-1},{1,0,-1},
+            {-1,0, 0},                  {1,0, 0},
+            {-1,0, 1},{0,0, 1},{1,0, 1},
+            // 3x3 flat at Y+1
+            {-1,1,-1},{0,1,-1},{1,1,-1},
+            {-1,1, 0},{0,1, 0},{1,1, 0},
+            {-1,1, 1},{0,1, 1},{1,1, 1}
+        };
+        int breaks = 0;
         BlockPos base = client.player.getBlockPos();
-        int[] offsets = goingRight ? new int[]{1, -1, -2, -3} : new int[]{-1, 1, 2, 3};
-        for (int ox : offsets) {
-            for (int oy : new int[]{0, 1}) {
-                BlockPos pos = base.add(ox, oy, 0);
-                var bs = client.world.getBlockState(pos);
-                if (bs.getBlock() instanceof CropBlock cb && cb.isMature(bs)) {
-                    client.interactionManager.attackBlock(pos, Direction.UP);
-                    clickCount++;
-                }
-            }
-        }
-
-        // 3x3x3 cube scan — break any mature crop in range
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    BlockPos pos = base.add(dx, dy, dz);
-                    var bs = client.world.getBlockState(pos);
-                    if (bs.getBlock() instanceof CropBlock cb && cb.isMature(bs)) {
-                        client.interactionManager.attackBlock(pos, Direction.UP);
-                        clickCount++;
-                    }
-                }
+        for (int[] o : offsets) {
+            if (breaks >= 8) break;
+            BlockPos pos = base.add(o[0], o[1], o[2]);
+            var bs = client.world.getBlockState(pos);
+            if (bs.getBlock() instanceof CropBlock cb && cb.isMature(bs)) {
+                client.interactionManager.attackBlock(pos, Direction.UP);
+                clickCount++;
+                breaks++;
             }
         }
     }
@@ -551,11 +551,14 @@ public class FarmBotMod implements ClientModInitializer {
     private void tickHawk(MinecraftClient client) {
         if (client.world == null) return;
 
-        // Scan radius-3 sphere and break fully grown nether wart directly
+        // Scan radius-3 sphere and break fully grown nether wart, capped at 8 breaks/tick
         BlockPos origin = client.player.getBlockPos();
+        int hawkBreaksThisTick = 0;
+        outer:
         for (int dx = -3; dx <= 3; dx++) {
             for (int dy = -3; dy <= 3; dy++) {
                 for (int dz = -3; dz <= 3; dz++) {
+                    if (hawkBreaksThisTick >= 8) break outer;
                     if (dx*dx + dy*dy + dz*dz > 9) continue;
                     BlockPos checkPos = origin.add(dx, dy, dz);
                     var bs = client.world.getBlockState(checkPos);
@@ -564,6 +567,7 @@ public class FarmBotMod implements ClientModInitializer {
                         client.interactionManager.attackBlock(checkPos, Direction.UP);
                         hawkBlocksBroken++;
                         clickCount++;
+                        hawkBreaksThisTick++;
                     }
                 }
             }
