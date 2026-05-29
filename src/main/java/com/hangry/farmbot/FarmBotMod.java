@@ -551,14 +551,11 @@ public class FarmBotMod implements ClientModInitializer {
     private void tickHawk(MinecraftClient client) {
         if (client.world == null) return;
 
-        // Scan radius-3 sphere and break fully grown nether wart, capped at 8 breaks/tick
+        // Scan radius-3 sphere — break every mature nether wart found this tick
         BlockPos origin = client.player.getBlockPos();
-        int hawkBreaksThisTick = 0;
-        outer:
         for (int dx = -3; dx <= 3; dx++) {
             for (int dy = -3; dy <= 3; dy++) {
                 for (int dz = -3; dz <= 3; dz++) {
-                    if (hawkBreaksThisTick >= 8) break outer;
                     if (dx*dx + dy*dy + dz*dz > 9) continue;
                     BlockPos checkPos = origin.add(dx, dy, dz);
                     var bs = client.world.getBlockState(checkPos);
@@ -567,7 +564,6 @@ public class FarmBotMod implements ClientModInitializer {
                         client.interactionManager.attackBlock(checkPos, Direction.UP);
                         hawkBlocksBroken++;
                         clickCount++;
-                        hawkBreaksThisTick++;
                     }
                 }
             }
