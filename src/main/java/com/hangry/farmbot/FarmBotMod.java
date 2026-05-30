@@ -61,6 +61,9 @@ public class FarmBotMod implements ClientModInitializer {
     public static int snowRows = 32;
     public static int snowRowWidth = 4;
 
+    // ── Hawk settings ─────────────────────────────────────────────────────────
+    public static int hawkRange = 3; // cube ±N in each axis
+
     // ── Global /fix all timer (all modes, every 5 min) ────────────────────────
     private static int fixAllTimer = 6000;
 
@@ -551,12 +554,12 @@ public class FarmBotMod implements ClientModInitializer {
     private void tickHawk(MinecraftClient client) {
         if (client.world == null) return;
 
-        // Scan radius-3 sphere — break every mature nether wart found this tick
+        // Scan cube ±hawkRange in all axes — configurable in menu
         BlockPos origin = client.player.getBlockPos();
-        for (int dx = -3; dx <= 3; dx++) {
-            for (int dy = -3; dy <= 3; dy++) {
-                for (int dz = -3; dz <= 3; dz++) {
-                    if (dx*dx + dy*dy + dz*dz > 9) continue;
+        int r = hawkRange;
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
                     BlockPos checkPos = origin.add(dx, dy, dz);
                     var bs = client.world.getBlockState(checkPos);
                     if (bs.getBlock() == Blocks.NETHER_WART &&
@@ -1042,6 +1045,7 @@ public class FarmBotMod implements ClientModInitializer {
         private int view = 0;
         private TextFieldWidget clickMinF, clickMaxF, sessionF, webhookF, usernameF;
         private TextFieldWidget snowRowsF, snowRowWidthF;
+        private TextFieldWidget hawkRangeF;
 
         public MainScreen(Screen parent) {
             super(Text.literal("BotMaster"));
@@ -1131,6 +1135,10 @@ public class FarmBotMod implements ClientModInitializer {
             snowRowWidthF = addField(px+pw-160, fy+12, 150, String.valueOf(snowRowWidth));
             fy += 36;
 
+            // Hawk
+            hawkRangeF = addField(px+10, fy+12, 80, String.valueOf(hawkRange));
+            fy += 36;
+
             // Username
             usernameF = addField(px+10, fy+12, pw-20, minecraftUsername);
             fy += 36;
@@ -1167,6 +1175,7 @@ public class FarmBotMod implements ClientModInitializer {
             try { sessionLimitMinutes = Math.max(0, Integer.parseInt(sessionF.getText())); } catch (Exception ignored) {}
             try { snowRows = Math.max(1, Integer.parseInt(snowRowsF.getText())); } catch (Exception ignored) {}
             try { snowRowWidth = Math.max(1, Integer.parseInt(snowRowWidthF.getText())); } catch (Exception ignored) {}
+            try { hawkRange = Math.max(1, Math.min(6, Integer.parseInt(hawkRangeF.getText()))); } catch (Exception ignored) {}
             if (usernameF != null) minecraftUsername = usernameF.getText().trim();
             if (webhookF != null) webhookUrl = webhookF.getText().trim();
         }
@@ -1263,6 +1272,8 @@ public class FarmBotMod implements ClientModInitializer {
             fy += 36;
             ctx.drawText(textRenderer, Text.literal("§7Snow rows"), px+10, fy, 0x0088aa, false);
             ctx.drawText(textRenderer, Text.literal("§7Snow row width"), px+pw-160, fy, 0x0088aa, false);
+            fy += 36;
+            ctx.drawText(textRenderer, Text.literal("§7Hawk cube range §8(1-6, e.g. 3=7x7x7, 4=9x9x9)"), px+10, fy, 0xffaa00, false);
             fy += 36;
             ctx.drawText(textRenderer, Text.literal("§7Minecraft username"), px+10, fy, 0xAAAAAA, false);
             fy += 36;
