@@ -410,10 +410,13 @@ public class FarmBotMod implements ClientModInitializer {
         // Extended reach — custom grid + 3x3 flat scan at Y and Y+1, capped at 8 breaks/tick
         if (client.world == null) return;
         int[][] offsets = {
-            // Custom far-grid offsets
+            // Custom far-grid — front half (dz negative)
             {-3,0,-2},{-2,0,-2},{2,0,-2},{3,0,-2},
             {-3,0,-1},{-2,0,-1},{2,0,-1},{3,0,-1},
             {-3,0, 0},{-2,0, 0},{-1,0, 0},{1,0, 0},{2,0, 0},{3,0, 0},
+            // Custom far-grid — behind half (dz positive, mirrored)
+            {-3,0, 1},{-2,0, 1},{2,0, 1},{3,0, 1},
+            {-3,0, 2},{-2,0, 2},{2,0, 2},{3,0, 2},
             // 3x3 flat at Y
             {-1,0,-1},{0,0,-1},{1,0,-1},
             {-1,0, 0},                  {1,0, 0},
