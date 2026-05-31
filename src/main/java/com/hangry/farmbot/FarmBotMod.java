@@ -62,10 +62,12 @@ public class FarmBotMod implements ClientModInitializer {
     public static int snowRowWidth = 4;
 
     // ── Hawk settings ─────────────────────────────────────────────────────────
-    public static int hawkRange = 3; // cube ±N in each axis
+    public static int hawkRange = 4;    // cube ±N in each axis (4 = 9x9x9)
+    public static int hawkBreakCap = 20; // max attackBlock calls per tick
 
     // ── Farm nuker settings ───────────────────────────────────────────────────
-    public static int farmRange = 4; // cube ±N in each axis
+    public static int farmRange = 4;    // cube ±N in each axis
+    public static int farmBreakCap = 20; // max attackBlock calls per tick
 
     // ── Global /fix all timer (all modes, every 5 min) ────────────────────────
     private static int fixAllTimer = 6000;
@@ -410,7 +412,7 @@ public class FarmBotMod implements ClientModInitializer {
             }
         }
 
-        // Crop nuker — full cube ±farmRange, break every mature crop in range
+        // Crop nuker — full cube ±farmRange, break up to farmBreakCap per tick
         if (client.world == null) return;
         int r = farmRange;
         int breaks = 0;
@@ -419,7 +421,7 @@ public class FarmBotMod implements ClientModInitializer {
         for (int dx = -r; dx <= r; dx++) {
             for (int dy = -r; dy <= r; dy++) {
                 for (int dz = -r; dz <= r; dz++) {
-                    if (breaks >= 8) break outer;
+                    if (breaks >= farmBreakCap) break outer;
                     BlockPos pos = base.add(dx, dy, dz);
                     var bs = client.world.getBlockState(pos);
                     if (bs.getBlock() instanceof CropBlock cb && cb.isMature(bs)) {
@@ -549,12 +551,15 @@ public class FarmBotMod implements ClientModInitializer {
     private void tickHawk(MinecraftClient client) {
         if (client.world == null) return;
 
-        // Scan cube ±hawkRange in all axes — configurable in menu
+        // Scan cube ±hawkRange, break up to hawkBreakCap mature warts per tick
         BlockPos origin = client.player.getBlockPos();
         int r = hawkRange;
+        int breaks = 0;
+        outer:
         for (int dx = -r; dx <= r; dx++) {
             for (int dy = -r; dy <= r; dy++) {
                 for (int dz = -r; dz <= r; dz++) {
+                    if (breaks >= hawkBreakCap) break outer;
                     BlockPos checkPos = origin.add(dx, dy, dz);
                     var bs = client.world.getBlockState(checkPos);
                     if (bs.getBlock() == Blocks.NETHER_WART &&
@@ -562,6 +567,7 @@ public class FarmBotMod implements ClientModInitializer {
                         client.interactionManager.attackBlock(checkPos, Direction.UP);
                         hawkBlocksBroken++;
                         clickCount++;
+                        breaks++;
                     }
                 }
             }
@@ -1040,7 +1046,7 @@ public class FarmBotMod implements ClientModInitializer {
         private int view = 0;
         private TextFieldWidget clickMinF, clickMaxF, sessionF, webhookF, usernameF;
         private TextFieldWidget snowRowsF, snowRowWidthF;
-        private TextFieldWidget hawkRangeF, farmRangeF;
+        private TextFieldWidget hawkRangeF, hawkCapF, farmRangeF, farmCapF;
 
         public MainScreen(Screen parent) {
             super(Text.literal("BotMaster"));
@@ -1130,9 +1136,12 @@ public class FarmBotMod implements ClientModInitializer {
             snowRowWidthF = addField(px+pw-160, fy+12, 150, String.valueOf(snowRowWidth));
             fy += 36;
 
-            // Hawk + Farm nuker range
-            hawkRangeF = addField(px+10, fy+12, 80, String.valueOf(hawkRange));
-            farmRangeF = addField(px+pw-160, fy+12, 80, String.valueOf(farmRange));
+            // Hawk range + cap
+            hawkRangeF = addField(px+10,      fy+12, 60, String.valueOf(hawkRange));
+            hawkCapF   = addField(px+80,       fy+12, 60, String.valueOf(hawkBreakCap));
+            // Farm range + cap
+            farmRangeF = addField(px+pw-160,   fy+12, 60, String.valueOf(farmRange));
+            farmCapF   = addField(px+pw-90,    fy+12, 60, String.valueOf(farmBreakCap));
             fy += 36;
 
             // Username
@@ -1171,8 +1180,10 @@ public class FarmBotMod implements ClientModInitializer {
             try { sessionLimitMinutes = Math.max(0, Integer.parseInt(sessionF.getText())); } catch (Exception ignored) {}
             try { snowRows = Math.max(1, Integer.parseInt(snowRowsF.getText())); } catch (Exception ignored) {}
             try { snowRowWidth = Math.max(1, Integer.parseInt(snowRowWidthF.getText())); } catch (Exception ignored) {}
-            try { hawkRange = Math.max(1, Math.min(6, Integer.parseInt(hawkRangeF.getText()))); } catch (Exception ignored) {}
-            try { farmRange = Math.max(1, Math.min(6, Integer.parseInt(farmRangeF.getText()))); } catch (Exception ignored) {}
+            try { hawkRange    = Math.max(1, Math.min(6,   Integer.parseInt(hawkRangeF.getText()))); } catch (Exception ignored) {}
+            try { hawkBreakCap = Math.max(1, Math.min(100, Integer.parseInt(hawkCapF.getText())));   } catch (Exception ignored) {}
+            try { farmRange    = Math.max(1, Math.min(6,   Integer.parseInt(farmRangeF.getText()))); } catch (Exception ignored) {}
+            try { farmBreakCap = Math.max(1, Math.min(100, Integer.parseInt(farmCapF.getText())));   } catch (Exception ignored) {}
             if (usernameF != null) minecraftUsername = usernameF.getText().trim();
             if (webhookF != null) webhookUrl = webhookF.getText().trim();
         }
@@ -1270,8 +1281,8 @@ public class FarmBotMod implements ClientModInitializer {
             ctx.drawText(textRenderer, Text.literal("§7Snow rows"), px+10, fy, 0x0088aa, false);
             ctx.drawText(textRenderer, Text.literal("§7Snow row width"), px+pw-160, fy, 0x0088aa, false);
             fy += 36;
-            ctx.drawText(textRenderer, Text.literal("§7Hawk range §8(1-6)"), px+10, fy, 0xffaa00, false);
-            ctx.drawText(textRenderer, Text.literal("§7Farm nuker range §8(1-6)"), px+pw-160, fy, 0x00ff88, false);
+            ctx.drawText(textRenderer, Text.literal("§7Hawk range  cap/tick"), px+10, fy, 0xffaa00, false);
+            ctx.drawText(textRenderer, Text.literal("§7Farm range  cap/tick"), px+pw-160, fy, 0x00ff88, false);
             fy += 36;
             ctx.drawText(textRenderer, Text.literal("§7Minecraft username"), px+10, fy, 0xAAAAAA, false);
             fy += 36;
