@@ -64,6 +64,9 @@ public class FarmBotMod implements ClientModInitializer {
     // ── Hawk settings ─────────────────────────────────────────────────────────
     public static int hawkRange = 3; // cube ±N in each axis
 
+    // ── Farm nuker settings ───────────────────────────────────────────────────
+    public static int farmRange = 4; // cube ±N in each axis
+
     // ── Global /fix all timer (all modes, every 5 min) ────────────────────────
     private static int fixAllTimer = 6000;
 
@@ -407,35 +410,24 @@ public class FarmBotMod implements ClientModInitializer {
             }
         }
 
-        // Extended reach — custom grid + 3x3 flat scan at Y and Y+1, capped at 8 breaks/tick
+        // Crop nuker — full cube ±farmRange, break every mature crop in range
         if (client.world == null) return;
-        int[][] offsets = {
-            // Custom far-grid — front half (dz negative)
-            {-3,0,-2},{-2,0,-2},{2,0,-2},{3,0,-2},
-            {-3,0,-1},{-2,0,-1},{2,0,-1},{3,0,-1},
-            {-3,0, 0},{-2,0, 0},{-1,0, 0},{1,0, 0},{2,0, 0},{3,0, 0},
-            // Custom far-grid — behind half (dz positive, mirrored)
-            {-3,0, 1},{-2,0, 1},{2,0, 1},{3,0, 1},
-            {-3,0, 2},{-2,0, 2},{2,0, 2},{3,0, 2},
-            // 3x3 flat at Y
-            {-1,0,-1},{0,0,-1},{1,0,-1},
-            {-1,0, 0},                  {1,0, 0},
-            {-1,0, 1},{0,0, 1},{1,0, 1},
-            // 3x3 flat at Y+1
-            {-1,1,-1},{0,1,-1},{1,1,-1},
-            {-1,1, 0},{0,1, 0},{1,1, 0},
-            {-1,1, 1},{0,1, 1},{1,1, 1}
-        };
+        int r = farmRange;
         int breaks = 0;
         BlockPos base = client.player.getBlockPos();
-        for (int[] o : offsets) {
-            if (breaks >= 8) break;
-            BlockPos pos = base.add(o[0], o[1], o[2]);
-            var bs = client.world.getBlockState(pos);
-            if (bs.getBlock() instanceof CropBlock cb && cb.isMature(bs)) {
-                client.interactionManager.attackBlock(pos, Direction.UP);
-                clickCount++;
-                breaks++;
+        outer:
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (breaks >= 8) break outer;
+                    BlockPos pos = base.add(dx, dy, dz);
+                    var bs = client.world.getBlockState(pos);
+                    if (bs.getBlock() instanceof CropBlock cb && cb.isMature(bs)) {
+                        client.interactionManager.attackBlock(pos, Direction.UP);
+                        clickCount++;
+                        breaks++;
+                    }
+                }
             }
         }
     }
@@ -1048,7 +1040,7 @@ public class FarmBotMod implements ClientModInitializer {
         private int view = 0;
         private TextFieldWidget clickMinF, clickMaxF, sessionF, webhookF, usernameF;
         private TextFieldWidget snowRowsF, snowRowWidthF;
-        private TextFieldWidget hawkRangeF;
+        private TextFieldWidget hawkRangeF, farmRangeF;
 
         public MainScreen(Screen parent) {
             super(Text.literal("BotMaster"));
@@ -1138,8 +1130,9 @@ public class FarmBotMod implements ClientModInitializer {
             snowRowWidthF = addField(px+pw-160, fy+12, 150, String.valueOf(snowRowWidth));
             fy += 36;
 
-            // Hawk
+            // Hawk + Farm nuker range
             hawkRangeF = addField(px+10, fy+12, 80, String.valueOf(hawkRange));
+            farmRangeF = addField(px+pw-160, fy+12, 80, String.valueOf(farmRange));
             fy += 36;
 
             // Username
@@ -1179,6 +1172,7 @@ public class FarmBotMod implements ClientModInitializer {
             try { snowRows = Math.max(1, Integer.parseInt(snowRowsF.getText())); } catch (Exception ignored) {}
             try { snowRowWidth = Math.max(1, Integer.parseInt(snowRowWidthF.getText())); } catch (Exception ignored) {}
             try { hawkRange = Math.max(1, Math.min(6, Integer.parseInt(hawkRangeF.getText()))); } catch (Exception ignored) {}
+            try { farmRange = Math.max(1, Math.min(6, Integer.parseInt(farmRangeF.getText()))); } catch (Exception ignored) {}
             if (usernameF != null) minecraftUsername = usernameF.getText().trim();
             if (webhookF != null) webhookUrl = webhookF.getText().trim();
         }
@@ -1276,7 +1270,8 @@ public class FarmBotMod implements ClientModInitializer {
             ctx.drawText(textRenderer, Text.literal("§7Snow rows"), px+10, fy, 0x0088aa, false);
             ctx.drawText(textRenderer, Text.literal("§7Snow row width"), px+pw-160, fy, 0x0088aa, false);
             fy += 36;
-            ctx.drawText(textRenderer, Text.literal("§7Hawk cube range §8(1-6, e.g. 3=7x7x7, 4=9x9x9)"), px+10, fy, 0xffaa00, false);
+            ctx.drawText(textRenderer, Text.literal("§7Hawk range §8(1-6)"), px+10, fy, 0xffaa00, false);
+            ctx.drawText(textRenderer, Text.literal("§7Farm nuker range §8(1-6)"), px+pw-160, fy, 0x00ff88, false);
             fy += 36;
             ctx.drawText(textRenderer, Text.literal("§7Minecraft username"), px+10, fy, 0xAAAAAA, false);
             fy += 36;
