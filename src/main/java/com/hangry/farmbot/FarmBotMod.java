@@ -111,7 +111,7 @@ public class FarmBotMod implements ClientModInitializer {
     private static int hawkBlocksBroken = 0;
     private static double hawkLastX = 0;
     private static double hawkLastZ = 0;
-    private static boolean hawkCurrentSlot = false; // false=slot0, true=slot1
+    private static int hawkBumpCount = 0; // increments each wall bounce; slot pattern [0,0,1] repeating
 
     // ── Mine state ────────────────────────────────────────────────────────────
     public enum MineState { MINING, BREAKING_ORE }
@@ -586,7 +586,7 @@ public class FarmBotMod implements ClientModInitializer {
 
             if (hawkStuckTicks >= STUCK_THRESHOLD) {
                 hawkGoingRight = !hawkGoingRight;
-                hawkCurrentSlot = !hawkCurrentSlot;
+                hawkBumpCount++;
                 hawkStuckTicks = 0;
                 hawkFlipGrace = 20;
             }
@@ -602,7 +602,8 @@ public class FarmBotMod implements ClientModInitializer {
         hawkLastX = cx;
         hawkLastZ = cz;
 
-        client.player.getInventory().selectedSlot = hawkCurrentSlot ? 1 : 0;
+        // Pattern: 2 laps Dex (slot 0), 1 lap Tiki (slot 1), repeat
+        client.player.getInventory().selectedSlot = (hawkBumpCount % 3 == 2) ? 1 : 0;
     }
 
     // ── Mine tick ─────────────────────────────────────────────────────────────
@@ -798,7 +799,7 @@ public class FarmBotMod implements ClientModInitializer {
         } else if (currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO) {
             hawkBlocksBroken = 0; hawkGoingRight = true;
             hawkStuckTicks = 0; hawkFlipGrace = 0;
-            hawkCurrentSlot = false;
+            hawkBumpCount = 0;
             hawkLastX = client.player.getX(); hawkLastZ = client.player.getZ();
         } else if (currentMode == BotMode.MINE) {
             mineState = MineState.MINING;
@@ -996,9 +997,11 @@ public class FarmBotMod implements ClientModInitializer {
             ctx.drawText(client.textRenderer,
                 Text.literal("§7Blocks/min: §6" + bpm),
                 x+6, y+51, 0xFFFFFF, false);
+            int hawkSlotNow = (hawkBumpCount % 3 == 2) ? 1 : 0;
+            String lapTag = (hawkBumpCount % 3 == 0) ? "§a[1/2]" : (hawkBumpCount % 3 == 1) ? "§a[2/2]" : "§6[Tiki]";
             ctx.drawText(client.textRenderer,
                 Text.literal("§7Dir: §f" + (hawkGoingRight ? "→R" : "←L") +
-                    "  §7Slot: §f" + (hawkCurrentSlot ? "Slot 2" : "Slot 1")),
+                    "  §7Slot: §f" + (hawkSlotNow == 0 ? "Dex" : "Tiki") + " " + lapTag),
                 x+6, y+61, 0xFFFFFF, false);
             ctx.fill(x+4, y+73, x+w-4, y+74, 0xFF332200);
             ctx.drawText(client.textRenderer,
