@@ -111,7 +111,6 @@ public class FarmBotMod implements ClientModInitializer {
     private static int hawkBlocksBroken = 0;
     private static double hawkLastX = 0;
     private static double hawkLastZ = 0;
-    private static int hawkSlotSwapTimer = 0;
     private static boolean hawkCurrentSlot = false; // false=slot0, true=slot1
 
     // ── Mine state ────────────────────────────────────────────────────────────
@@ -587,6 +586,7 @@ public class FarmBotMod implements ClientModInitializer {
 
             if (hawkStuckTicks >= STUCK_THRESHOLD) {
                 hawkGoingRight = !hawkGoingRight;
+                hawkCurrentSlot = !hawkCurrentSlot;
                 hawkStuckTicks = 0;
                 hawkFlipGrace = 20;
             }
@@ -602,12 +602,6 @@ public class FarmBotMod implements ClientModInitializer {
         hawkLastX = cx;
         hawkLastZ = cz;
 
-        // Auto slot swap every 100 ticks (5 seconds)
-        hawkSlotSwapTimer++;
-        if (hawkSlotSwapTimer >= 100) {
-            hawkSlotSwapTimer = 0;
-            hawkCurrentSlot = !hawkCurrentSlot;
-        }
         client.player.getInventory().selectedSlot = hawkCurrentSlot ? 1 : 0;
     }
 
@@ -804,7 +798,7 @@ public class FarmBotMod implements ClientModInitializer {
         } else if (currentMode == BotMode.HAWKJIGARFARMMEGAFASTVIPPRO) {
             hawkBlocksBroken = 0; hawkGoingRight = true;
             hawkStuckTicks = 0; hawkFlipGrace = 0;
-            hawkSlotSwapTimer = 0; hawkCurrentSlot = false;
+            hawkCurrentSlot = false;
             hawkLastX = client.player.getX(); hawkLastZ = client.player.getZ();
         } else if (currentMode == BotMode.MINE) {
             mineState = MineState.MINING;
