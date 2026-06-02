@@ -602,8 +602,8 @@ public class FarmBotMod implements ClientModInitializer {
         hawkLastX = cx;
         hawkLastZ = cz;
 
-        // Pattern: 2 laps Dex (slot 0), 1 lap Tiki (slot 1), repeat
-        client.player.getInventory().selectedSlot = (hawkBumpCount % 3 == 2) ? 1 : 0;
+        // Swap slot every 2 bounces: 0,0,1,1,0,0,1,1...
+        client.player.getInventory().selectedSlot = (hawkBumpCount / 2) % 2;
     }
 
     // ── Mine tick ─────────────────────────────────────────────────────────────
@@ -997,11 +997,11 @@ public class FarmBotMod implements ClientModInitializer {
             ctx.drawText(client.textRenderer,
                 Text.literal("§7Blocks/min: §6" + bpm),
                 x+6, y+51, 0xFFFFFF, false);
-            int hawkSlotNow = (hawkBumpCount % 3 == 2) ? 1 : 0;
-            String lapTag = (hawkBumpCount % 3 == 0) ? "§a[1/2]" : (hawkBumpCount % 3 == 1) ? "§a[2/2]" : "§6[Tiki]";
+            int hawkSlotNow = (hawkBumpCount / 2) % 2;
+            String bounceTag = "§8(" + (hawkBumpCount % 2 + 1) + "/2)";
             ctx.drawText(client.textRenderer,
                 Text.literal("§7Dir: §f" + (hawkGoingRight ? "→R" : "←L") +
-                    "  §7Slot: §f" + (hawkSlotNow == 0 ? "Dex" : "Tiki") + " " + lapTag),
+                    "  §7Slot: §f" + (hawkSlotNow == 0 ? "Dex" : "Tiki") + " " + bounceTag),
                 x+6, y+61, 0xFFFFFF, false);
             ctx.fill(x+4, y+73, x+w-4, y+74, 0xFF332200);
             ctx.drawText(client.textRenderer,
