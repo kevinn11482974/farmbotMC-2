@@ -98,7 +98,6 @@ public class FarmBotMod implements ClientModInitializer {
     private static int snowCycleCount = 0;
     private static int snowStuckTicks = 0;
     private static boolean snowSteppingForward = false;
-    private static double snowForwardStartZ = 0;
     private static double snowLastX = 0, snowLastZ = 0;
     private static int snowClickTimer = 0;
     private static int snowCurrentClickEvery = 1;
@@ -463,9 +462,16 @@ public class FarmBotMod implements ClientModInitializer {
                 double cx = client.player.getX();
                 double cz = client.player.getZ();
 
+                double moved = snowSteppingForward
+                    ? Math.hypot(cx - snowLastX, cz - snowLastZ)
+                    : Math.abs(cx - snowLastX);
+
+                if (moved < 0.01) snowStuckTicks++;
+                else snowStuckTicks = 0;
+
                 if (snowSteppingForward) {
-                    // Walking forward (Z axis) to step between rows
-                    if (Math.abs(cz - snowForwardStartZ) >= snowRowWidth) {
+                    // Walk W until hitting the far wall
+                    if (snowStuckTicks >= STUCK_THRESHOLD) {
                         stopAllMovement();
                         pressKey(GLFW.GLFW_KEY_SPACE, false);
                         snowSteppingForward = false;
@@ -473,40 +479,28 @@ public class FarmBotMod implements ClientModInitializer {
                         snowRowCount++;
                         snowStuckTicks = 0;
                         snowLastX = cx;
-                        snowLastZ = cz;
                         if (snowRowCount >= snowRows) {
-                            stopAllMovement();
                             snowState = SnowState.TELEPORTING;
                             snowTeleportDelay = 0;
                         }
                     } else {
-                        // Still stepping forward — jump if stuck
-                        double moved = Math.abs(cz - snowLastZ);
-                        if (moved < 0.01) {
-                            snowStuckTicks++;
-                            if (snowStuckTicks >= STUCK_THRESHOLD)
-                                pressKey(GLFW.GLFW_KEY_SPACE, true);
-                        } else {
-                            snowStuckTicks = 0;
-                            pressKey(GLFW.GLFW_KEY_SPACE, false);
-                        }
                         pressKey(GLFW.GLFW_KEY_A, false);
                         pressKey(GLFW.GLFW_KEY_D, false);
                         pressKey(GLFW.GLFW_KEY_W, true);
+                        if (snowStuckTicks >= STUCK_THRESHOLD / 2)
+                            pressKey(GLFW.GLFW_KEY_SPACE, true);
+                        else
+                            pressKey(GLFW.GLFW_KEY_SPACE, false);
+                        snowLastX = cx;
                         snowLastZ = cz;
                     }
                 } else {
-                    // Walking sideways (X axis) through the row
-                    double moved = Math.abs(cx - snowLastX);
-                    if (moved < 0.01) snowStuckTicks++;
-                    else snowStuckTicks = 0;
-
+                    // Walk sideways until hitting the side wall
                     if (snowStuckTicks >= STUCK_THRESHOLD) {
-                        // Hit wall — begin forward step
                         snowStuckTicks = 0;
                         stopAllMovement();
                         snowSteppingForward = true;
-                        snowForwardStartZ = cz;
+                        snowLastX = cx;
                         snowLastZ = cz;
                     } else {
                         if (snowGoingRight) {
