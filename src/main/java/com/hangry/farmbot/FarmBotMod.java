@@ -111,6 +111,9 @@ public class FarmBotMod implements ClientModInitializer {
     private static double hawkLastX = 0;
     private static double hawkLastZ = 0;
     private static int hawkBumpCount = 0; // increments each wall bounce; slot pattern [0,0,1] repeating
+    private static int hawkFlyCheckTimer = 36000;     // 30 min (ticks) between fly checks
+    private static boolean hawkFlyCheckPending = false;
+    private static int hawkFlyCheckRetryTimer = 0;
 
     // ── Mine state ────────────────────────────────────────────────────────────
     public enum MineState { MINING, BREAKING_ORE }
@@ -203,6 +206,12 @@ public class FarmBotMod implements ClientModInitializer {
                     else if (raw.contains("Punch") || raw.contains("Hit"))    startActivityCmd(mc.player, "Punch");
                     else if (raw.contains("Click"))                        startActivityCmd(mc.player, "Click");
                 }
+            }
+            // Hawk fly-check — confirm /fly actually disabled flight
+            if (hawkFlyCheckPending && raw.toLowerCase().contains("you have disabled permanent flight")) {
+                hawkFlyCheckPending = false;
+                hawkFlyCheckRetryTimer = 0;
+                hawkFlyCheckTimer = 36000;
             }
             // Weather vote (always active in SNOW mode)
             if (currentMode == BotMode.SNOW) {
@@ -544,6 +553,16 @@ public class FarmBotMod implements ClientModInitializer {
     private void tickHawk(MinecraftClient client) {
         if (client.world == null) return;
 
+        // Fly check every 30 min — send /fly and confirm via chat, retry until disabled
+        if (!hawkFlyCheckPending && --hawkFlyCheckTimer <= 0) {
+            hawkFlyCheckPending = true;
+            hawkFlyCheckRetryTimer = 0;
+        }
+        if (hawkFlyCheckPending && --hawkFlyCheckRetryTimer <= 0) {
+            client.player.networkHandler.sendCommand("fly");
+            hawkFlyCheckRetryTimer = 60; // resend every 3s until "disabled" message confirms
+        }
+
         // Scan cube ±hawkRange, break up to hawkBreakCap mature warts per tick
         BlockPos origin = client.player.getBlockPos();
         int r = hawkRange;
@@ -767,6 +786,11 @@ public class FarmBotMod implements ClientModInitializer {
             botActive = false;
             return;
         }
+        // Make sure flight is off before starting any mode except Mine
+        if (currentMode != BotMode.MINE && client.player.getAbilities().flying) {
+            client.player.networkHandler.sendCommand("fly");
+        }
+
         startTime = System.currentTimeMillis();
         clickCount = 0;
         activityCheckCount = 0;
@@ -795,6 +819,7 @@ public class FarmBotMod implements ClientModInitializer {
             hawkStuckTicks = 0; hawkFlipGrace = 0;
             hawkBumpCount = 0;
             hawkLastX = client.player.getX(); hawkLastZ = client.player.getZ();
+            hawkFlyCheckTimer = 36000; hawkFlyCheckPending = false; hawkFlyCheckRetryTimer = 0;
         } else if (currentMode == BotMode.MINE) {
             mineState = MineState.MINING;
             mineOreBroken = 0;
